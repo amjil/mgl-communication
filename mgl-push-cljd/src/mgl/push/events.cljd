@@ -1,0 +1,19 @@
+(ns mgl.push.events
+  "Push event helpers for ClojureDart apps."
+  (:require
+   ["package:mgl_push/mgl_push.dart" :as push]))
+
+(defn token-changed? [event]
+  (dart/is? event push/TokenChangedEvent))
+
+(defn message? [event]
+  (dart/is? event push/MessageEvent))
+
+(defn notification-open? [event]
+  (dart/is? event push/NotificationOpenEvent))
+
+(defn error? [event]
+  (dart/is? event push/ErrorEvent))
+
+(defn type [event]
+  (.-type ^push/PushEvent event))

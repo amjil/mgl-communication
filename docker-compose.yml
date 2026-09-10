@@ -1,0 +1,37 @@
+# mgl-push Docker Compose (Phase 1)
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: mglpush
+      POSTGRES_PASSWORD: mglpush
+      POSTGRES_DB: mglpush
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./mgl-push-server/migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mglpush -d mglpush"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mgl-push:
+    build:
+      context: ./mgl-push-server
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MGL_PUSH_ENV: development
+      MGL_PUSH_HTTP_ADDR: ":8080"
+      MGL_PUSH_DATABASE_URL: postgres://mglpush:mglpush@postgres:5432/mglpush?sslmode=disable
+      MGL_PUSH_SERVICE_TOKENS: "dev-token:net.amjil.demo"
+    ports:
+      - "8080:8080"
+
+volumes:
+  pgdata:

@@ -1,0 +1,62 @@
+(ns mgl.push.core
+  "Thin ClojureDart wrapper around the mgl_push Flutter package.
+   Do not re-implement providers here."
+  (:require
+   ["package:mgl_push/mgl_push.dart" :as push]))
+
+(defn- ->config
+  "Build a Dart MglPushConfig from a Clojure map or pass through an existing one."
+  [config]
+  (cond
+    (dart/is? config push/MglPushConfig) config
+    (map? config)
+    (push/MglPushConfig.
+     .serverUrl (or (:server-url config) (:serverUrl config))
+     .serviceToken (or (:service-token config) (:serviceToken config))
+     .appId (or (:app-id config) (:appId config))
+     .registerOnInitialize
+     (cond
+       (contains? config :register-on-initialize) (:register-on-initialize config)
+       (contains? config :registerOnInitialize) (:registerOnInitialize config)
+       :else true))
+    :else
+    (throw (ex-info "mgl.push/create expects a map or MglPushConfig"
+                    {:config config}))))
+
+(defn create
+  "Create an MglPush client.
+
+   Config map keys (kebab-case preferred):
+   - :server-url (required)
+   - :service-token (required)
+   - :app-id (required)
+   - :register-on-initialize (optional, default true)"
+  [config]
+  (push/createMglPush (->config config)))
+
+(defn initialize [client]
+  (.initialize ^push/MglPush client))
+
+(defn register [client]
+  (.register ^push/MglPush client))
+
+(defn device [client]
+  (.getDevice ^push/MglPush client))
+
+(defn unregister [client]
+  (.unregister ^push/MglPush client))
+
+(defn set-user-id [client user-id]
+  (.setUserId ^push/MglPush client user-id))
+
+(defn clear-user-id [client]
+  (.clearUserId ^push/MglPush client))
+
+(defn request-permission [client]
+  (.requestPermission ^push/MglPush client))
+
+(defn messages [client]
+  (.-messages ^push/MglPush client))
+
+(defn events [client]
+  (.-events ^push/MglPush client))

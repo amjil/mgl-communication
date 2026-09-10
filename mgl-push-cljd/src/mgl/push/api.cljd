@@ -1,0 +1,22 @@
+(ns mgl.push.api
+  "Re-exports core API for convenience."
+  (:require
+   [mgl.push.core :as core]
+   [mgl.push.events :as events]))
+
+(def create core/create)
+(def initialize core/initialize)
+(def register core/register)
+(def device core/device)
+(def unregister core/unregister)
+(def set-user-id core/set-user-id)
+(def clear-user-id core/clear-user-id)
+(def request-permission core/request-permission)
+(def messages core/messages)
+(def events-stream core/events)
+
+(def token-changed? events/token-changed?)
+(def message? events/message?)
+(def notification-open? events/notification-open?)
+(def error? events/error?)
+(def event-type events/type)
