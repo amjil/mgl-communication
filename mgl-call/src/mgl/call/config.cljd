@@ -1,0 +1,47 @@
+(ns mgl.call.config
+  "Library configuration (init! options).")
+
+(def default-config
+  {:user-id nil
+   :access-token nil
+   :signaling-url nil
+   :signaling nil                          ; injectable signaling map
+   :ice-servers [{:urls ["stun:stun.l.google.com:19302"]}]
+   :ring-timeout-ms 60000
+   :connect-timeout-ms 30000
+   :log-level :info
+   :reconnect {:enabled true
+               :max-attempts 5
+               :backoff [1000 2000 4000 8000]}})
+
+(defonce ^:private !config (atom default-config))
+
+(defn config []
+  @!config)
+
+(defn get*
+  ([k] (get @!config k))
+  ([k not-found] (get @!config k not-found)))
+
+(defn reset-config!
+  "Replace config with defaults merged over provided map."
+  [m]
+  (reset! !config (merge default-config (or m {})))
+  @!config)
+
+(defn update-config! [f & args]
+  (apply swap! !config f args)
+  @!config)
+
+(defn ice-servers []
+  (or (get* :ice-servers) []))
+
+(defn ring-timeout-ms []
+  (or (get* :ring-timeout-ms) 60000))
+
+(defn connect-timeout-ms []
+  (or (get* :connect-timeout-ms) 30000))
+
+(defn reconnect-cfg []
+  (or (get* :reconnect)
+      {:enabled true :max-attempts 5 :backoff [1000 2000 4000 8000]}))

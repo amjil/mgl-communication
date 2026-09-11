@@ -1,0 +1,171 @@
+(ns mgl.call.state
+  "Global call registry (atom-based, no large state framework)."
+  (:require
+   ["dart:core" :as dart :refer [DateTime]]
+   [mgl.call.event :as event]))
+
+(def initial
+  {:initialized? false
+   :calls {}
+   :active-call-id nil
+   ;; runtime resources keyed by call-id (peer, timers) — not public API
+   :resources {}})
+
+(defonce state (atom initial))
+
+(def terminal-states
+  #{:ended :failed :rejected :cancelled})
+
+(def active-states
+  #{:creating :ringing :connecting :connected :reconnecting})
+
+;; Legal transitions for the public call state machine.
+(def transitions
+  {:idle #{:creating :ringing}
+   :creating #{:ringing :connecting :cancelled :failed :ended}
+   :ringing #{:connecting :rejected :cancelled :failed :ended}
+   :connecting #{:connected :reconnecting :failed :ended :cancelled}
+   :connected #{:reconnecting :ended :failed}
+   :reconnecting #{:connected :failed :ended}
+   :ended #{}
+   :failed #{}
+   :rejected #{}
+   :cancelled #{}})
+
+(defn can-transition?
+  [from to]
+  (contains? (get transitions from #{}) to))
+
+(defn now-ms []
+  (.-millisecondsSinceEpoch (DateTime/now)))
+
+(defn reset-state! []
+  (reset! state initial))
+
+(defn initialized? []
+  (boolean (:initialized? @state)))
+
+(defn set-initialized! [v]
+  (swap! state assoc :initialized? (boolean v)))
+
+(defn active-call-id []
+  (:active-call-id @state))
+
+(defn in-call?
+  "True when there is a non-terminal active call."
+  []
+  (when-let [id (:active-call-id @state)]
+    (let [st (get-in @state [:calls id :state])]
+      (contains? active-states st))))
+
+(defn get-call
+  ([call-id]
+   (get-in @state [:calls call-id]))
+  ([]
+   (when-let [id (:active-call-id @state)]
+     (get-call id))))
+
+(defn put-call!
+  [session]
+  (let [id (:call-id session)]
+    (swap! state
+           (fn [s]
+             (-> s
+                 (assoc-in [:calls id] session)
+                 (assoc :active-call-id id))))
+    session))
+
+(defn update-call!
+  [call-id f & args]
+  (swap! state
+         (fn [s]
+           (if-let [c (get-in s [:calls call-id])]
+             (assoc-in s [:calls call-id] (apply f c args))
+             s)))
+  (get-call call-id))
+
+(defn set-call-state!
+  "Transition call state if legal. Returns updated session or nil.
+   Also emits :call-state-changed when successful."
+  [call-id new-state]
+  (let [cur (get-call call-id)
+        from (:state cur)]
+    (cond
+      (nil? cur) nil
+      (= from new-state) cur
+      (not (can-transition? from new-state))
+      (do
+        (dart:core/print
+         (str "[mgl-call/state] illegal transition " from " -> " new-state
+              " call-id=" call-id))
+        nil)
+      :else
+      (let [updated
+            (update-call! call-id
+                          (fn [c]
+                            (cond-> (assoc c :state new-state)
+                              (= new-state :connected)
+                              (assoc :connected-at (now-ms))
+                              (contains? terminal-states new-state)
+                              (assoc :ended-at (now-ms)))))]
+        (event/emit!
+         {:type :call-state-changed
+          :call-id call-id
+          :from from
+          :state new-state
+          :session updated})
+        updated))))
+
+(defn clear-active-if!
+  [call-id]
+  (swap! state
+         (fn [s]
+           (if (= call-id (:active-call-id s))
+             (assoc s :active-call-id nil)
+             s))))
+
+(defn remove-call!
+  [call-id]
+  (swap! state
+         (fn [s]
+           (cond-> (update s :calls dissoc call-id)
+             (= call-id (:active-call-id s))
+             (assoc :active-call-id nil)
+             true
+             (update :resources dissoc call-id))))
+  nil)
+
+(defn get-resource [call-id]
+  (get-in @state [:resources call-id]))
+
+(defn put-resource! [call-id resource]
+  (swap! state assoc-in [:resources call-id] resource)
+  resource)
+
+(defn update-resource! [call-id f & args]
+  (swap! state
+         (fn [s]
+           (let [r (get-in s [:resources call-id])]
+             (assoc-in s [:resources call-id] (apply f (or r {}) args)))))
+  (get-resource call-id))
+
+(defn remove-resource! [call-id]
+  (swap! state update :resources dissoc call-id)
+  nil)
+
+(defn public-state
+  "Public snapshot for (call/state)."
+  ([]
+   (if-let [c (get-call)]
+     (select-keys c [:call-id :state :media-type :direction
+                     :local-audio-enabled? :local-video-enabled?
+                     :speaker-enabled? :camera-facing
+                     :remote-user :caller :callee])
+     {:state :idle}))
+  ([call-id]
+   (if-let [c (get-call call-id)]
+     (select-keys c [:call-id :state :media-type :direction
+                     :local-audio-enabled? :local-video-enabled?
+                     :speaker-enabled? :camera-facing
+                     :remote-user :caller :callee])
+     nil)))

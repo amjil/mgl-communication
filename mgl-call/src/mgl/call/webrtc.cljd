@@ -1,0 +1,139 @@
+(ns mgl.call.webrtc
+  "PeerConnection orchestration via the Dart WebrtcPeer bridge."
+  (:require
+   ["package:mgl_call/mgl_call.dart" :as bridge]
+   [mgl.call.config :as config]
+   [mgl.call.event :as event]
+   [mgl.call.log :as log]
+   [mgl.call.signaling :as signaling]
+   [mgl.call.state :as state]))
+
+(defn- ice-servers-list []
+  (mapv (fn [s]
+          (let [urls (or (:urls s) (:url s))
+                url-list (cond
+                           (string? urls) [urls]
+                           (sequential? urls) (vec urls)
+                           :else [])]
+            (cond-> {"urls" url-list}
+              (:username s) (assoc "username" (:username s))
+              (:credential s) (assoc "credential" (:credential s)))))
+        (config/ice-servers)))
+
+(defn- on-ice-state! [call-id s]
+  (state/update-call! call-id assoc :ice-state (keyword s))
+  (case s
+    "connected"
+    (do (event/emit-type! :ice-connected call-id)
+        (when (= :reconnecting (:state (state/get-call call-id)))
+          (when (state/set-call-state! call-id :connected)
+            (event/emit-type! :call-connected call-id))))
+    "completed"
+    (event/emit-type! :ice-connected call-id)
+    "disconnected"
+    (do (event/emit-type! :ice-disconnected call-id)
+        (when (= :connected (:state (state/get-call call-id)))
+          (when (state/set-call-state! call-id :reconnecting)
+            (event/emit-type! :call-reconnecting call-id))))
+    "failed"
+    (event/emit-type! :ice-failed call-id)
+    "checking"
+    (event/emit-type! :ice-gathering call-id)
+    nil))
+
+(defn- on-pc-state! [call-id s]
+  (state/update-call! call-id assoc :connection-state (keyword s))
+  (case s
+    "connecting" (event/emit-type! :peer-connecting call-id)
+    "connected"
+    (do (event/emit-type! :peer-connected call-id)
+        (when (contains? #{:connecting :reconnecting}
+                         (:state (state/get-call call-id)))
+          (when (state/set-call-state! call-id :connected)
+            (event/emit-type! :call-connected call-id))))
+    "disconnected"
+    (do (event/emit-type! :peer-disconnected call-id)
+        (when (= :connected (:state (state/get-call call-id)))
+          (when (state/set-call-state! call-id :reconnecting)
+            (event/emit-type! :call-reconnecting call-id))))
+    "failed"
+    (when (contains? #{:connecting :connected :reconnecting}
+                     (:state (state/get-call call-id)))
+      (when (state/set-call-state! call-id :failed)
+        (event/emit-type! :call-failed call-id
+                          {:error {:code :peer-connection-failed
+                                   :message "PeerConnection failed"}})))
+    nil))
+
+(defn ^:async create-peer!
+  "Create WebrtcPeer for call-id and store in resources."
+  [call-id]
+  (let [peer (bridge/WebrtcPeer.
+              .onIceCandidate
+              (fn [cand]
+                (signaling/webrtc-ice call-id
+                                      {:candidate (get cand "candidate")
+                                       :sdpMid (get cand "sdpMid")
+                                       :sdpMLineIndex (get cand "sdpMLineIndex")}))
+              .onIceConnectionState
+              (fn [s] (on-ice-state! call-id s))
+              .onConnectionState
+              (fn [s] (on-pc-state! call-id s))
+              .onSignalingState
+              (fn [s]
+                (state/update-call! call-id assoc :signaling-state (keyword s)))
+              .onTrack
+              (fn [stream track]
+                (state/update-resource! call-id assoc :remote-stream stream)
+                (event/emit-type! :track-added call-id
+                                  {:kind (.-kind track)})))]
+    (await (.create peer .iceServers (ice-servers-list)))
+    (state/update-resource! call-id assoc :peer peer)
+    (log/info "PeerConnection created call-id=" call-id)
+    peer))
+
+(defn peer [call-id]
+  (:peer (state/get-resource call-id)))
+
+(defn ^:async attach-local!
+  [call-id stream]
+  (when-let [peer (peer call-id)]
+    (state/update-resource! call-id assoc :local-stream stream)
+    (await (.setLocalStream peer stream))))
+
+(defn ^:async create-offer!
+  [call-id]
+  (let [peer (peer call-id)
+        desc (await (.createOffer peer))]
+    (log/info "offer created call-id=" call-id)
+    {:type (get desc "type") :sdp (get desc "sdp")}))
+
+(defn ^:async create-answer!
+  [call-id]
+  (let [peer (peer call-id)
+        desc (await (.createAnswer peer))]
+    (log/info "answer created call-id=" call-id)
+    {:type (get desc "type") :sdp (get desc "sdp")}))
+
+(defn ^:async set-remote-description!
+  [call-id type sdp]
+  (when-let [peer (peer call-id)]
+    (await (.setRemoteDescription peer type sdp))))
+
+(defn ^:async add-ice-candidate!
+  [call-id candidate]
+  (when-let [peer (peer call-id)]
+    (let [m {"candidate" (or (:candidate candidate) (get candidate "candidate"))
+             "sdpMid" (or (:sdpMid candidate) (:sdp-mid candidate)
+                          (get candidate "sdpMid"))
+             "sdpMLineIndex" (or (:sdpMLineIndex candidate)
+                                 (:sdp-m-line-index candidate)
+                                 (get candidate "sdpMLineIndex"))}]
+      (await (.addIceCandidate peer m)))))
+
+(defn ^:async close!
+  [call-id]
+  (when-let [peer (peer call-id)]
+    (await (.close peer))
+    (state/update-resource! call-id dissoc :peer :local-stream :remote-stream)
+    (log/info "PeerConnection closed call-id=" call-id)))

@@ -1,0 +1,61 @@
+(ns mgl.call
+  "Public API for mgl-call (spec §11 / §64).
+
+   Prefer:
+     (require '[mgl.call :as call])
+     (call/init! {...})
+     (call/start! {:callee-id \"...\" :media-type :audio})"
+  (:require
+   [mgl.call.core :as core]
+   [mgl.call.error :as err]
+   [mgl.call.log :as log]
+   [mgl.call.signaling :as signaling]
+   [mgl.call.state :as state]))
+
+(def init! core/init!)
+(def start! core/start!)
+(def incoming! core/incoming!)
+(def accept! core/accept!)
+(def reject! core/reject!)
+(def hangup! core/hangup!)
+
+(def mute! core/mute!)
+(def toggle-mute! core/toggle-mute!)
+(def set-video-enabled! core/set-video-enabled!)
+(def toggle-video! core/toggle-video!)
+(def switch-camera! core/switch-camera!)
+(def set-speaker! core/set-speaker!)
+(def audio-route core/audio-route)
+(def set-audio-route! core/set-audio-route!)
+
+(def state core/call-state)
+(def stats core/call-stats)
+(def diagnostics core/diagnostics)
+
+(def on core/on)
+(def off core/off)
+
+(def local-stream core/local-stream)
+(def remote-stream core/remote-stream)
+(def local-video-source core/local-video-source)
+(def remote-video-source core/remote-video-source)
+
+(def microphone-permission core/microphone-permission)
+(def camera-permission core/camera-permission)
+(def request-microphone-permission! core/request-microphone-permission!)
+(def request-camera-permission! core/request-camera-permission!)
+
+(def error? err/error?)
+(def error-code err/code)
+(def error-message err/message)
+
+(def set-log-level! log/set-level!)
+
+(def set-signaling! signaling/set-transport!)
+(def signaling-send! signaling/send!)
+(def signaling-connect! signaling/connect!)
+(def signaling-disconnect! signaling/disconnect!)
+
+(def in-call? state/in-call?)
+(def can-transition? state/can-transition?)
+(def terminal-states state/terminal-states)

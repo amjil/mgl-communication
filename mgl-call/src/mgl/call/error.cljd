@@ -1,0 +1,21 @@
+(ns mgl.call.error
+  "Unified error map helpers (spec §75).")
+
+(defn error
+  ([code message]
+   {:error {:code code :message message}})
+  ([code message data]
+   {:error (merge {:code code :message message} data)}))
+
+(defn error? [v]
+  (boolean (and (map? v) (contains? v :error))))
+
+(defn code [v]
+  (get-in v [:error :code]))
+
+(defn message [v]
+  (get-in v [:error :message]))
+
+(defn ok
+  ([] {:ok true})
+  ([m] (assoc m :ok true)))

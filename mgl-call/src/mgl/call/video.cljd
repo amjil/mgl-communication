@@ -1,0 +1,45 @@
+(ns mgl.call.video
+  "Camera on/off and switch (spec §17–18)."
+  (:require
+   ["package:flutter_webrtc/flutter_webrtc.dart" :as webrtc]
+   ["package:mgl_call/mgl_call.dart" :as bridge]
+   [mgl.call.event :as event]
+   [mgl.call.log :as log]
+   [mgl.call.media :as media]
+   [mgl.call.signaling :as signaling]
+   [mgl.call.state :as state]))
+
+(defn set-video-enabled!
+  [call-id enabled?]
+  (media/set-video-enabled! call-id enabled?)
+  (signaling/media-video call-id enabled?)
+  (event/emit-type! :local-video-changed call-id
+                    {:local-video-enabled? (boolean enabled?)})
+  {:ok true :local-video-enabled? (boolean enabled?)})
+
+(defn toggle-video!
+  [call-id]
+  (let [enabled? (boolean (:local-video-enabled? (state/get-call call-id)))]
+    (set-video-enabled! call-id (not enabled?))))
+
+(defn ^:async switch-camera!
+  "Toggle front/back camera via Helper.switchCamera."
+  [call-id]
+  (if-let [^webrtc/MediaStreamTrack track (media/local-video-track call-id)]
+    (let [front? (await (bridge.MediaHelper/switchCamera track))
+          facing (if front? :front :back)]
+      (state/update-call! call-id assoc :camera-facing facing)
+      (event/emit-type! :camera-changed call-id {:camera-facing facing})
+      (log/info "camera-facing=" facing " call-id=" call-id)
+      {:ok true :camera-facing facing})
+    {:error {:code :media-device-error
+             :message "No local video track"}}))
+
+(defn local-video-source
+  "Object suitable for binding to RTCVideoRenderer (the MediaStream)."
+  ([] (local-video-source (state/active-call-id)))
+  ([call-id] (media/local-stream call-id)))
+
+(defn remote-video-source
+  ([] (remote-video-source (state/active-call-id)))
+  ([call-id] (media/remote-stream call-id)))

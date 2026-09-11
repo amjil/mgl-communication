@@ -1,0 +1,80 @@
+(ns mgl.call.lifecycle
+  "Timers: ring timeout, connect timeout, reconnect backoff."
+  (:require
+   ["dart:async" :as async]
+   [mgl.call.config :as config]
+   [mgl.call.event :as event]
+   [mgl.call.log :as log]
+   [mgl.call.state :as state]))
+
+(defn cancel-timer! [call-id key]
+  (when-let [^async/Timer t (get (state/get-resource call-id) key)]
+    (try (.cancel t) (catch Exception _)))
+  (state/update-resource! call-id dissoc key)
+  nil)
+
+(defn cancel-all!
+  [call-id]
+  (cancel-timer! call-id :ring-timer)
+  (cancel-timer! call-id :connect-timer)
+  (cancel-timer! call-id :reconnect-timer)
+  nil)
+
+(defn start-ring-timeout!
+  "Outgoing ringing → cancelled after ring-timeout-ms."
+  [call-id on-timeout]
+  (cancel-timer! call-id :ring-timer)
+  (let [ms (config/ring-timeout-ms)
+        t (async/Timer.
+           (Duration. .milliseconds ms)
+           (fn []
+             (log/warn "ring timeout call-id=" call-id)
+             (on-timeout)))]
+    (state/update-resource! call-id assoc :ring-timer t)
+    t))
+
+(defn start-connect-timeout!
+  "connecting → failed after connect-timeout-ms."
+  [call-id on-timeout]
+  (cancel-timer! call-id :connect-timer)
+  (let [ms (config/connect-timeout-ms)
+        t (async/Timer.
+           (Duration. .milliseconds ms)
+           (fn []
+             (log/warn "connect timeout call-id=" call-id)
+             (on-timeout)))]
+    (state/update-resource! call-id assoc :connect-timer t)
+    t))
+
+(defn clear-connect-timeout! [call-id]
+  (cancel-timer! call-id :connect-timer))
+
+(defn schedule-reconnect!
+  "Exponential backoff reconnect schedule. Returns true if scheduled."
+  [call-id attempt on-fire]
+  (let [cfg (config/reconnect-cfg)
+        enabled? (not= false (:enabled cfg))
+        max-a (or (:max-attempts cfg) 5)
+        backoff (or (:backoff cfg) [1000 2000 4000 8000])]
+    (cond
+      (not enabled?) false
+      (>= attempt max-a) false
+      :else
+      (let [ms (nth backoff (min attempt (dec (count backoff))) 8000)
+            t (async/Timer.
+               (Duration. .milliseconds ms)
+               (fn []
+                 (log/info "reconnect attempt=" (inc attempt) " call-id=" call-id)
+                 (on-fire (inc attempt))))]
+        (cancel-timer! call-id :reconnect-timer)
+        (state/update-resource! call-id assoc
+                                :reconnect-timer t
+                                :reconnect-attempt attempt)
+        true))))
+
+(defn on-app-lifecycle!
+  "Keep PeerConnection alive across Flutter lifecycle changes (spec §59).
+   First version only logs; host apps should not dispose sessions on pause."
+  [phase]
+  (log/debug "app lifecycle=" phase " active=" (state/active-call-id))
+  nil)

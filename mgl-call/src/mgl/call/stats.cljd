@@ -1,0 +1,61 @@
+(ns mgl.call.stats
+  "Call statistics (spec §61). First phase: RTT / loss / jitter / bitrate."
+  (:require
+   [mgl.call.log :as log]
+   [mgl.call.webrtc :as webrtc]))
+
+(defn- report->map [report]
+  (let [vals (into {} (.-values report))]
+    (assoc vals
+           "id" (.-id report)
+           "type" (.-type report)
+           "timestamp" (.-timestamp report))))
+
+(defn- num* [m & ks]
+  (some (fn [k]
+          (let [v (get m k)]
+            (cond
+              (number? v) v
+              (string? v)
+              (try (dart:core/double.parse v) (catch Exception _ nil))
+              :else nil)))
+        ks))
+
+(defn ^:async stats
+  "Return a simplified stats map for call-id."
+  [call-id]
+  (let [peer (webrtc/peer call-id)]
+    (if-not peer
+      {:rtt-ms nil :packet-loss nil :jitter-ms nil
+       :audio-bitrate nil :video-bitrate nil :connection-type nil}
+      (try
+        (let [reports (await (.getStats peer))
+              maps (mapv report->map reports)
+              inbound (filter #(or (= "inbound-rtp" (get % "type"))
+                                   (= "ssrc" (get % "type")))
+                              maps)
+              candidate-pair (some #(when (= "candidate-pair" (get % "type")) %) maps)
+              rtt (or (num* candidate-pair "currentRoundTripTime" "totalRoundTripTime")
+                      (some #(num* % "googRtt" "roundTripTime") maps))
+              loss (some #(num* % "packetsLost") inbound)
+              jitter (some #(num* % "jitter") inbound)
+              audio-br (some (fn [m]
+                               (when (or (= "audio" (get m "kind"))
+                                         (= "audio" (get m "mediaType")))
+                                 (num* m "bytesReceived" "bytesSent")))
+                             inbound)
+              video-br (some (fn [m]
+                               (when (or (= "video" (get m "kind"))
+                                         (= "video" (get m "mediaType")))
+                                 (num* m "bytesReceived" "bytesSent")))
+                             inbound)]
+          {:rtt-ms (when rtt (if (< rtt 10) (* rtt 1000) rtt))
+           :packet-loss loss
+           :jitter-ms (when jitter (if (< jitter 10) (* jitter 1000) jitter))
+           :audio-bitrate audio-br
+           :video-bitrate video-br
+           :connection-type nil})
+        (catch Exception e
+          (log/warn "stats failed: " e)
+          {:rtt-ms nil :packet-loss nil :jitter-ms nil
+           :audio-bitrate nil :video-bitrate nil :connection-type nil})))))

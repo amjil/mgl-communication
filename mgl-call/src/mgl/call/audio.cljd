@@ -1,0 +1,54 @@
+(ns mgl.call.audio
+  "Speaker / earpiece / audio-route control (spec §17, §57)."
+  (:require
+   ["package:mgl_call/mgl_call.dart" :as bridge]
+   [mgl.call.event :as event]
+   [mgl.call.log :as log]
+   [mgl.call.media :as media]
+   [mgl.call.signaling :as signaling]
+   [mgl.call.state :as state]))
+
+(defn ^:async set-speaker!
+  "Enable or disable loudspeaker."
+  [call-id enabled?]
+  (await (bridge.MediaHelper/setSpeakerphoneOn (boolean enabled?)))
+  (state/update-call! call-id assoc :speaker-enabled? (boolean enabled?))
+  (event/emit-type! :speaker-changed call-id {:speaker-enabled? (boolean enabled?)})
+  (log/info "speaker=" enabled? " call-id=" call-id)
+  {:ok true :speaker-enabled? (boolean enabled?)})
+
+(defn speaker-enabled?
+  ([] (speaker-enabled? (state/active-call-id)))
+  ([call-id]
+   (boolean (:speaker-enabled? (state/get-call call-id)))))
+
+(defn audio-route
+  "Current logical audio route. First version: :speaker | :earpiece."
+  ([] (audio-route (state/active-call-id)))
+  ([call-id]
+   (if (speaker-enabled? call-id) :speaker :earpiece)))
+
+(defn ^:async set-audio-route!
+  "Set logical audio route. Supported: :speaker :earpiece.
+   :bluetooth / :wired-headset reserved for phase 2."
+  [call-id route]
+  (case route
+    :speaker (await (set-speaker! call-id true))
+    :earpiece (await (set-speaker! call-id false))
+    {:error {:code :unsupported-platform
+             :message (str "Unsupported audio route: " route)}}))
+
+(defn mute!
+  "Mute (true) or unmute (false) local microphone via track.enabled."
+  [call-id muted?]
+  (let [enabled? (not muted?)]
+    (media/set-audio-enabled! call-id enabled?)
+    (signaling/media-audio call-id enabled?)
+    (event/emit-type! :local-audio-changed call-id
+                      {:local-audio-enabled? enabled?})
+    {:ok true :muted? (boolean muted?)}))
+
+(defn toggle-mute!
+  [call-id]
+  (let [enabled? (boolean (:local-audio-enabled? (state/get-call call-id)))]
+    (mute! call-id enabled?)))

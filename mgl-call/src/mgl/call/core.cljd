@@ -1,0 +1,389 @@
+(ns mgl.call.core
+  "Call orchestration: init, start, incoming, accept, reject, hangup."
+  (:require
+   [mgl.call.audio :as audio]
+   [mgl.call.config :as config]
+   [mgl.call.diagnostics :as diag]
+   [mgl.call.error :as err]
+   [mgl.call.event :as event]
+   [mgl.call.lifecycle :as life]
+   [mgl.call.log :as log]
+   [mgl.call.media :as media]
+   [mgl.call.permissions :as perms]
+   [mgl.call.session :as session]
+   [mgl.call.signaling :as signaling]
+   [mgl.call.state :as state]
+   [mgl.call.stats :as stats]
+   [mgl.call.video :as video]
+   [mgl.call.webrtc :as webrtc]))
+
+(declare hangup! cleanup-call! fail-call!)
+
+(defn- msg-type [msg]
+  (let [t (:type msg)]
+    (cond
+      (keyword? t) t
+      (string? t) (keyword t)
+      :else nil)))
+
+(defn- ^:async handle-remote-offer! [call-id sdp]
+  (state/update-resource! call-id assoc :pending-offer sdp)
+  (when (webrtc/peer call-id)
+    (await (webrtc/set-remote-description! call-id "offer" sdp))))
+
+(defn- ^:async handle-remote-answer! [call-id sdp]
+  (await (webrtc/set-remote-description! call-id "answer" sdp)))
+
+(defn- ^:async handle-remote-ice! [call-id candidate]
+  (await (webrtc/add-ice-candidate! call-id candidate)))
+
+(defn- on-ring-timeout! [call-id]
+  (when-let [c (state/get-call call-id)]
+    (when (= :ringing (:state c))
+      (log/warn "ringing timed out, cancelling call-id=" call-id)
+      (signaling/call-cancel call-id)
+      (when (state/set-call-state! call-id :cancelled)
+        (event/emit-type! :call-cancelled call-id {:reason :timeout}))
+      (cleanup-call! call-id))))
+
+(defn- on-connect-timeout! [call-id]
+  (when-let [c (state/get-call call-id)]
+    (when (= :connecting (:state c))
+      (fail-call! call-id :signaling-timeout "Connection timeout"))))
+
+(defn- ^:async prepare-media-and-peer!
+  "Permissions → local media → PeerConnection → attach tracks."
+  [call-id media-type]
+  (let [perm (await (perms/ensure-for-media! media-type))]
+    (if (err/error? perm)
+      perm
+      (try
+        (await (webrtc/create-peer! call-id))
+        (let [stream (await (media/acquire-local! media-type))]
+          (await (webrtc/attach-local! call-id stream))
+          {:ok true})
+        (catch Exception e
+          (log/error "prepare media failed: " e)
+          (err/error :media-device-error (str e)))))))
+
+(defn- ^:async start-outgoing-webrtc!
+  [call-id]
+  (let [c (state/get-call call-id)
+        prep (await (prepare-media-and-peer! call-id (:media-type c)))]
+    (if (err/error? prep)
+      (do (fail-call! call-id (err/code prep) (err/message prep))
+          prep)
+      (let [offer (await (webrtc/create-offer! call-id))]
+        (signaling/webrtc-offer call-id (:sdp offer))
+        (life/start-connect-timeout! call-id #(on-connect-timeout! call-id))
+        {:ok true}))))
+
+(defn- ^:async start-incoming-webrtc!
+  [call-id]
+  (let [c (state/get-call call-id)
+        prep (await (prepare-media-and-peer! call-id (:media-type c)))]
+    (if (err/error? prep)
+      (do (fail-call! call-id (err/code prep) (err/message prep))
+          prep)
+      (let [offer-sdp (:pending-offer (state/get-resource call-id))]
+        (when offer-sdp
+          (await (webrtc/set-remote-description! call-id "offer" offer-sdp)))
+        (let [answer (await (webrtc/create-answer! call-id))]
+          (signaling/webrtc-answer call-id (:sdp answer))
+          (life/start-connect-timeout! call-id #(on-connect-timeout! call-id))
+          {:ok true})))))
+
+(defn- handle-signaling-message! [msg]
+  (let [type (msg-type msg)
+        call-id (:call-id msg)
+        c (when call-id (state/get-call call-id))]
+    (log/debug "signaling message " type " call-id=" call-id)
+    (case type
+      (:call.ringing "call.ringing")
+      (when c
+        (when (state/set-call-state! call-id :ringing)
+          (event/emit-type! :call-ringing call-id)
+          (when (= :outgoing (:direction c))
+            (life/start-ring-timeout! call-id #(on-ring-timeout! call-id)))))
+
+      (:call.accept "call.accept" :call.accepted "call.accepted")
+      (when (and c (= :outgoing (:direction c)))
+        (life/cancel-timer! call-id :ring-timer)
+        (when (state/set-call-state! call-id :connecting)
+          (event/emit-type! :call-connecting call-id)
+          (start-outgoing-webrtc! call-id)))
+
+      (:call.reject "call.reject" :call.rejected "call.rejected")
+      (when c
+        (when (state/set-call-state! call-id :rejected)
+          (event/emit-type! :call-rejected call-id))
+        (cleanup-call! call-id))
+
+      (:call.cancel "call.cancel" :call.cancelled "call.cancelled")
+      (when c
+        (when (state/set-call-state! call-id :cancelled)
+          (event/emit-type! :call-cancelled call-id))
+        (cleanup-call! call-id))
+
+      (:call.end "call.end" :call.ended "call.ended")
+      (when c
+        (when (state/set-call-state! call-id :ended)
+          (event/emit-type! :call-ended call-id))
+        (cleanup-call! call-id))
+
+      (:webrtc.offer "webrtc.offer")
+      (when call-id
+        (handle-remote-offer! call-id (:sdp msg)))
+
+      (:webrtc.answer "webrtc.answer")
+      (when call-id
+        (handle-remote-answer! call-id (:sdp msg)))
+
+      (:webrtc.ice-candidate "webrtc.ice-candidate")
+      (when call-id
+        (handle-remote-ice! call-id
+                            {:candidate (:candidate msg)
+                             :sdpMid (or (:sdpMid msg) (:sdp-mid msg))
+                             :sdpMLineIndex (or (:sdpMLineIndex msg)
+                                                (:sdp-m-line-index msg))}))
+
+      (:call.mute "call.mute")
+      (when c
+        (state/update-call! call-id assoc :remote-audio-enabled? false)
+        (event/emit-type! :remote-audio-changed call-id
+                          {:remote-audio-enabled? false}))
+
+      (:call.unmute "call.unmute")
+      (when c
+        (state/update-call! call-id assoc :remote-audio-enabled? true)
+        (event/emit-type! :remote-audio-changed call-id
+                          {:remote-audio-enabled? true}))
+
+      (:call.video-off "call.video-off")
+      (when c
+        (state/update-call! call-id assoc :remote-video-enabled? false)
+        (event/emit-type! :remote-video-changed call-id
+                          {:remote-video-enabled? false}))
+
+      (:call.video-on "call.video-on")
+      (when c
+        (state/update-call! call-id assoc :remote-video-enabled? true)
+        (event/emit-type! :remote-video-changed call-id
+                          {:remote-video-enabled? true}))
+
+      (log/debug "unhandled signaling type=" type))))
+
+(defn ^:async cleanup-call!
+  "Release media, peer, timers for a terminal call."
+  [call-id]
+  (life/cancel-all! call-id)
+  (try
+    (await (webrtc/close! call-id))
+    (catch Exception e
+      (log/warn "cleanup peer failed: " e)))
+  (state/remove-resource! call-id)
+  (state/clear-active-if! call-id)
+  nil)
+
+(defn fail-call!
+  [call-id code message]
+  (state/update-call! call-id assoc :error {:code code :message message})
+  (when (state/set-call-state! call-id :failed)
+    (event/emit-type! :call-failed call-id
+                      {:error {:code code :message message}}))
+  (cleanup-call! call-id)
+  (err/error code message))
+
+;; ── Public API ──────────────────────────────────────────────
+
+(defn ^:async init!
+  "Initialize mgl-call.
+
+   Config keys:
+   - :user-id
+   - :access-token
+   - :signaling-url  (or :signaling transport map)
+   - :ice-servers
+   - :ring-timeout-ms
+   - :connect-timeout-ms
+   - :reconnect
+   - :log-level"
+  [opts]
+  (config/reset-config! opts)
+  (mgl.call.log/set-level! (or (:log-level opts) :info))
+  (signaling/set-transport! nil)
+  (signaling/ensure-transport!)
+  (signaling/on-message! handle-signaling-message!)
+  (when (or (:signaling-url opts) (:signaling opts))
+    (await (signaling/connect!)))
+  (state/set-initialized! true)
+  (log/info "initialized user-id=" (:user-id opts))
+  (err/ok))
+
+(defn ^:async start!
+  "Start an outgoing call.
+
+   opts: {:callee-id \"...\" :media-type :audio|:video
+          :callee {:id :name :avatar-url}
+          :call-id (optional server id)}"
+  [opts]
+  (cond
+    (not (state/initialized?))
+    (err/error :signaling-failed "Call (call/init!) first")
+
+    (state/in-call?)
+    (err/error :already-in-call "Already in a call")
+
+    :else
+    (let [media (or (:media-type opts) :audio)
+          callee-id (:callee-id opts)
+          callee (or (:callee opts)
+                     {:id callee-id :name nil :avatar-url nil})
+          s (session/create
+             {:call-id (:call-id opts)
+              :direction :outgoing
+              :media-type media
+              :state :creating
+              :callee callee
+              :caller {:id (config/get* :user-id)}
+              :remote-user callee})
+          call-id (:call-id s)]
+      (state/put-call! s)
+      (state/put-resource! call-id {})
+      (event/emit-type! :call-created call-id {:session s})
+      (signaling/call-create
+       {:call-id call-id
+        :callee-id callee-id
+        :media-type (name media)
+        :caller-id (config/get* :user-id)})
+      ;; Optimistic ringing until server confirms; still legal from creating.
+      (when (state/set-call-state! call-id :ringing)
+        (event/emit-type! :call-ringing call-id)
+        (life/start-ring-timeout! call-id #(on-ring-timeout! call-id)))
+      {:call-id call-id})))
+
+(defn incoming!
+  "Register an incoming call (typically from mgl-push via the app layer).
+
+   opts: {:call-id :caller-id :media-type :caller}"
+  [opts]
+  (cond
+    (not (state/initialized?))
+    (err/error :signaling-failed "Call (call/init!) first")
+
+    (state/in-call?)
+    (err/error :already-in-call "Already in a call")
+
+    (nil? (:call-id opts))
+    (err/error :call-not-found "call-id is required")
+
+    :else
+    (let [media (or (:media-type opts) :audio)
+          media (if (string? media) (keyword media) media)
+          caller (or (:caller opts)
+                     {:id (:caller-id opts) :name nil :avatar-url nil})
+          s (session/create
+             {:call-id (:call-id opts)
+              :direction :incoming
+              :media-type media
+              :state :ringing
+              :caller caller
+              :callee {:id (config/get* :user-id)}
+              :remote-user caller})]
+      (state/put-call! s)
+      (state/put-resource! (:call-id s) {})
+      (event/emit-type! :call-created (:call-id s) {:session s})
+      (event/emit-type! :call-ringing (:call-id s))
+      {:call-id (:call-id s)})))
+
+(defn ^:async accept!
+  [call-id]
+  (let [c (state/get-call call-id)]
+    (cond
+      (nil? c)
+      (err/error :call-not-found "Call not found")
+
+      (not= :incoming (:direction c))
+      (err/error :call-not-found "Not an incoming call")
+
+      (not= :ringing (:state c))
+      (err/error :call-already-ended (str "Cannot accept from " (:state c)))
+
+      :else
+      (do
+        (signaling/call-accept call-id)
+        (when (state/set-call-state! call-id :connecting)
+          (event/emit-type! :call-connecting call-id))
+        (await (start-incoming-webrtc! call-id))
+        {:ok true :call-id call-id}))))
+
+(defn reject!
+  [call-id]
+  (let [c (state/get-call call-id)]
+    (cond
+      (nil? c)
+      (err/error :call-not-found "Call not found")
+
+      :else
+      (do
+        (signaling/call-reject call-id)
+        (when (state/set-call-state! call-id :rejected)
+          (event/emit-type! :call-rejected call-id))
+        (cleanup-call! call-id)
+        {:ok true}))))
+
+(defn ^:async hangup!
+  [call-id]
+  (let [c (state/get-call call-id)]
+    (cond
+      (nil? c)
+      (err/error :call-not-found "Call not found")
+
+      (contains? state/terminal-states (:state c))
+      (err/error :call-already-ended "Call already ended")
+
+      :else
+      (do
+        (if (and (= :ringing (:state c)) (= :outgoing (:direction c)))
+          (signaling/call-cancel call-id)
+          (signaling/call-end call-id))
+        (let [terminal (if (and (= :ringing (:state c))
+                                (= :outgoing (:direction c)))
+                         :cancelled
+                         :ended)
+              ev (if (= terminal :cancelled) :call-cancelled :call-ended)]
+          (when (state/set-call-state! call-id terminal)
+            (event/emit-type! ev call-id))
+          (await (cleanup-call! call-id))
+          {:ok true})))))
+
+(defn call-state
+  ([] (state/public-state))
+  ([call-id] (state/public-state call-id)))
+
+(defn on [event-type handler]
+  (event/on event-type handler))
+
+(defn off
+  ([] (event/off))
+  ([event-type] (event/off event-type))
+  ([event-type key] (event/off event-type key)))
+
+(defn mute! [call-id muted?] (audio/mute! call-id muted?))
+(defn toggle-mute! [call-id] (audio/toggle-mute! call-id))
+(defn set-video-enabled! [call-id enabled?] (video/set-video-enabled! call-id enabled?))
+(defn toggle-video! [call-id] (video/toggle-video! call-id))
+(defn ^:async switch-camera! [call-id] (await (video/switch-camera! call-id)))
+(defn ^:async set-speaker! [call-id enabled?] (await (audio/set-speaker! call-id enabled?)))
+(defn audio-route ([] (audio/audio-route)) ([call-id] (audio/audio-route call-id)))
+(defn ^:async set-audio-route! [call-id route] (await (audio/set-audio-route! call-id route)))
+(defn local-stream ([] (media/local-stream)) ([call-id] (media/local-stream call-id)))
+(defn remote-stream ([] (media/remote-stream)) ([call-id] (media/remote-stream call-id)))
+(defn local-video-source ([] (video/local-video-source)) ([call-id] (video/local-video-source call-id)))
+(defn remote-video-source ([] (video/remote-video-source)) ([call-id] (video/remote-video-source call-id)))
+(defn ^:async microphone-permission [] (await (perms/microphone-permission)))
+(defn ^:async camera-permission [] (await (perms/camera-permission)))
+(defn ^:async request-microphone-permission! [] (await (perms/request-microphone-permission!)))
+(defn ^:async request-camera-permission! [] (await (perms/request-camera-permission!)))
+(defn ^:async call-stats [call-id] (await (stats/stats call-id)))
+(defn diagnostics ([] (diag/diagnostics)) ([call-id] (diag/diagnostics call-id)))

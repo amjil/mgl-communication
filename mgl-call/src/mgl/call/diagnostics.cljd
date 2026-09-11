@@ -1,0 +1,39 @@
+(ns mgl.call.diagnostics
+  "Dev diagnostics snapshot (spec §62). Never includes tokens / SDP / TURN secrets."
+  (:require
+   [mgl.call.media :as media]
+   [mgl.call.state :as state]
+   [mgl.call.webrtc :as webrtc]))
+
+(defn diagnostics
+  "Safe diagnostic map for the active (or given) call."
+  ([]
+   (diagnostics (state/active-call-id)))
+  ([call-id]
+   (let [c (state/get-call call-id)
+         peer (webrtc/peer call-id)
+         local (media/local-stream call-id)
+         remote (media/remote-stream call-id)]
+     {:call-id call-id
+      :call-state (:state c)
+      :direction (:direction c)
+      :media-type (:media-type c)
+      :peer-connection-state (or (:connection-state c)
+                                 (when peer (keyword (.-connectionState peer))))
+      :ice-state (or (:ice-state c)
+                     (when peer (keyword (.-iceConnectionState peer))))
+      :signaling-state (or (:signaling-state c)
+                           (when peer (keyword (.-signalingState peer))))
+      :local-tracks (if local
+                      (+ (count (media/audio-tracks local))
+                         (count (media/video-tracks local)))
+                      0)
+      :remote-tracks (if remote
+                       (+ (count (media/audio-tracks remote))
+                          (count (media/video-tracks remote)))
+                       0)
+      :local-audio-enabled? (:local-audio-enabled? c)
+      :local-video-enabled? (:local-video-enabled? c)
+      :speaker-enabled? (:speaker-enabled? c)
+      :initialized? (state/initialized?)
+      :in-call? (state/in-call?)})))

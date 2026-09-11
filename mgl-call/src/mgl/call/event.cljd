@@ -1,0 +1,45 @@
+(ns mgl.call.event
+  "Typed event bus for call / media / webrtc events.")
+
+(defonce ^:private !handlers
+  (atom {}))
+
+(defn on
+  "Subscribe to an event type. Returns a zero-arg dispose function.
+   Same key overwrites previous handler when provided."
+  ([event-type handler]
+   (on event-type (str (hash handler) "-" (hash event-type)) handler))
+  ([event-type key handler]
+   (swap! !handlers assoc-in [event-type key] handler)
+   #(swap! !handlers update event-type dissoc key)))
+
+(defn off
+  "Remove handlers. (off) clears all; (off type) clears type; (off type key) removes one."
+  ([]
+   (reset! !handlers {})
+   nil)
+  ([event-type]
+   (swap! !handlers dissoc event-type)
+   nil)
+  ([event-type key]
+   (swap! !handlers update event-type dissoc key)
+   nil))
+
+(defn emit!
+  "Dispatch an event map to all handlers registered for (:type event).
+   Event should include :type and typically :call-id."
+  [event]
+  (let [type (:type event)
+        hs (vals (get @!handlers type {}))]
+    (doseq [h hs]
+      (try
+        (h event)
+        (catch Exception e
+          (dart:core/print (str "[mgl-call/event] handler error: " e))))))
+  event)
+
+(defn emit-type!
+  ([type call-id]
+   (emit! {:type type :call-id call-id}))
+  ([type call-id extra]
+   (emit! (merge {:type type :call-id call-id} extra))))

@@ -1,0 +1,203 @@
+(ns mgl.call.signaling
+  "Signaling abstraction. Do not couple WebRTC to Phoenix Channel details.
+
+   A signaling transport is a map:
+   {:connect! (fn [])
+    :disconnect! (fn [])
+    :send! (fn [msg])
+    :on-message! (fn [handler])}"
+  (:require
+   ["dart:async" :as async]
+   ["dart:convert" :as convert]
+   ["package:web_socket_channel/web_socket_channel.dart" :as ws]
+   [mgl.call.config :as config]
+   [mgl.call.log :as log]))
+
+(defonce ^:private !transport (atom nil))
+(defonce ^:private !handler (atom nil))
+(defonce ^:private !conn
+  (atom {:channel nil :subscription nil :status :disconnected}))
+
+(defn- keywordize-keys [m]
+  (cond
+    (map? m)
+    (into {}
+          (map (fn [[k v]]
+                 [(if (string? k) (keyword k) k)
+                  (keywordize-keys v)]))
+          m)
+    (sequential? m) (mapv keywordize-keys m)
+    :else m))
+
+(defn- stringify-keys [m]
+  (cond
+    (map? m)
+    (into {}
+          (map (fn [[k v]]
+                 [(if (keyword? k) (name k) (str k))
+                  (stringify-keys v)]))
+          m)
+    (sequential? m) (mapv stringify-keys m)
+    :else m))
+
+(defn- dispatch! [raw]
+  (try
+    (let [msg (keywordize-keys (convert/jsonDecode raw))]
+      (log/debug "signaling recv type=" (:type msg) " call-id=" (:call-id msg))
+      (when-let [h @!handler]
+        (h msg)))
+    (catch Exception e
+      (log/error "signaling decode failed: " e))))
+
+(defn- teardown-ws! [reason]
+  (let [{:keys [subscription channel]} @!conn]
+    (when subscription
+      (try (.cancel ^async/StreamSubscription subscription) (catch Exception _)))
+    (when channel
+      (try
+        (.close (.-sink ^ws/WebSocketChannel channel))
+        (catch Exception _))))
+  (reset! !conn {:channel nil :subscription nil :status :disconnected})
+  (log/info "signaling disconnected reason=" reason))
+
+(defn make-websocket
+  "Build a default WebSocket signaling transport from current config.
+
+   Messages are JSON objects with at least :type and usually :call-id.
+   Auth token is sent as a query param when present (host apps may replace
+   this transport with a Phoenix Channel adapter)."
+  []
+  (let [url (config/get* :signaling-url)
+        token (config/get* :access-token)]
+    {:connect!
+     (fn ^:async []
+       (cond
+         (nil? url)
+         (do (log/warn "no signaling-url configured") false)
+
+         (= :open (:status @!conn)) true
+
+         :else
+         (try
+           (swap! !conn assoc :status :connecting)
+           (let [full-url (if (and token (pos? (count token)))
+                             (str url
+                                  (if (.contains ^String url "?") "&" "?")
+                                  "access_token="
+                                  (dart:core/Uri.encodeQueryComponent token))
+                             url)
+                 channel (ws/WebSocketChannel.connect
+                          (dart:core/Uri.parse full-url))
+                 sub (.listen (.-stream channel)
+                              (fn [raw] (dispatch! raw))
+                              .onError (fn [err]
+                                         (log/error "signaling error: " err)
+                                         (teardown-ws! (str err)))
+                              .onDone (fn [] (teardown-ws! "closed")))]
+             (swap! !conn assoc :channel channel :subscription sub)
+             (await (.timeout (.-ready channel) (Duration. .seconds 15)))
+             (swap! !conn assoc :status :open)
+             (log/info "signaling connected")
+             true)
+           (catch Exception e
+             (log/error "signaling connect failed: " e)
+             (teardown-ws! (str e))
+             false))))
+
+     :disconnect!
+     (fn []
+       (when-not (= :disconnected (:status @!conn))
+         (teardown-ws! "local")))
+
+     :send!
+     (fn [msg]
+       (when (= :open (:status @!conn))
+         (let [^ws/WebSocketChannel channel (:channel @!conn)
+               payload (convert/jsonEncode (stringify-keys msg))]
+           (log/debug "signaling send type=" (:type msg) " call-id=" (:call-id msg))
+           (.add (.-sink channel) payload)
+           true)))
+
+     :on-message!
+     (fn [handler]
+       (reset! !handler handler)
+       nil)
+
+     :status
+     (fn [] (:status @!conn))}))
+
+(defn set-transport!
+  "Install a signaling transport map (or nil)."
+  [transport]
+  (reset! !transport transport)
+  transport)
+
+(defn transport
+  "Current transport, or nil."
+  []
+  @!transport)
+
+(defn ensure-transport!
+  "Use injected :signaling from config, else default WebSocket transport."
+  []
+  (or @!transport
+      (let [injected (config/get* :signaling)
+            t (or injected (make-websocket))]
+        (reset! !transport t)
+        t)))
+
+(defn ^:async connect! []
+  (let [t (ensure-transport!)]
+    (await ((:connect! t)))))
+
+(defn disconnect! []
+  (when-let [t @!transport]
+    ((:disconnect! t))))
+
+(defn send!
+  "Send a signaling message map. Returns true when handed to transport."
+  [msg]
+  (if-let [t @!transport]
+    (boolean ((:send! t) msg))
+    (do (log/warn "send! with no transport") false)))
+
+(defn on-message!
+  "Register the single global inbound message handler."
+  [handler]
+  (let [t (ensure-transport!)]
+    ((:on-message! t) handler)))
+
+;; Convenience message builders
+
+(defn call-create [m]
+  (send! (merge {:type "call.create"} m)))
+
+(defn call-accept [call-id]
+  (send! {:type "call.accept" :call-id call-id}))
+
+(defn call-reject [call-id]
+  (send! {:type "call.reject" :call-id call-id}))
+
+(defn call-cancel [call-id]
+  (send! {:type "call.cancel" :call-id call-id}))
+
+(defn call-end [call-id]
+  (send! {:type "call.end" :call-id call-id}))
+
+(defn webrtc-offer [call-id sdp]
+  (send! {:type "webrtc.offer" :call-id call-id :sdp sdp}))
+
+(defn webrtc-answer [call-id sdp]
+  (send! {:type "webrtc.answer" :call-id call-id :sdp sdp}))
+
+(defn webrtc-ice [call-id candidate]
+  (send! (merge {:type "webrtc.ice-candidate" :call-id call-id}
+                candidate)))
+
+(defn media-audio [call-id enabled?]
+  (send! {:type (if enabled? "call.unmute" "call.mute")
+          :call-id call-id}))
+
+(defn media-video [call-id enabled?]
+  (send! {:type (if enabled? "call.video-on" "call.video-off")
+          :call-id call-id}))

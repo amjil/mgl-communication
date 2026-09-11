@@ -1,0 +1,66 @@
+(ns mgl.call.media
+  "Local / remote MediaStream helpers."
+  (:require
+   ["package:flutter_webrtc/flutter_webrtc.dart" :as webrtc]
+   ["package:mgl_call/mgl_call.dart" :as bridge]
+   [mgl.call.log :as log]
+   [mgl.call.state :as state]))
+
+(defn ^:async acquire-local!
+  "getUserMedia for the given media-type (:audio | :video)."
+  [media-type]
+  (let [video? (= media-type :video)]
+    (log/info "getUserMedia audio=true video=" video?)
+    (await (bridge.MediaHelper/getUserMedia
+            .audio true
+            .video video?
+            .facingMode "user"))))
+
+(defn audio-tracks [^webrtc/MediaStream stream]
+  (when stream (vec (.getAudioTracks stream))))
+
+(defn video-tracks [^webrtc/MediaStream stream]
+  (when stream (vec (.getVideoTracks stream))))
+
+(defn set-audio-enabled!
+  "Mute/unmute by toggling track.enabled — does not stop the device."
+  [call-id enabled?]
+  (when-let [res (state/get-resource call-id)]
+    (when-let [^webrtc/MediaStream stream (:local-stream res)]
+      (doseq [^webrtc/MediaStreamTrack t (audio-tracks stream)]
+        (bridge.MediaHelper/setTrackEnabled t (boolean enabled?))))
+    (state/update-call! call-id assoc :local-audio-enabled? (boolean enabled?))
+    enabled?))
+
+(defn set-video-enabled!
+  [call-id enabled?]
+  (when-let [res (state/get-resource call-id)]
+    (when-let [^webrtc/MediaStream stream (:local-stream res)]
+      (doseq [^webrtc/MediaStreamTrack t (video-tracks stream)]
+        (bridge.MediaHelper/setTrackEnabled t (boolean enabled?))))
+    (state/update-call! call-id assoc :local-video-enabled? (boolean enabled?))
+    enabled?))
+
+(defn local-stream
+  ([] (local-stream (state/active-call-id)))
+  ([call-id]
+   (:local-stream (state/get-resource call-id))))
+
+(defn remote-stream
+  ([] (remote-stream (state/active-call-id)))
+  ([call-id]
+   (:remote-stream (state/get-resource call-id))))
+
+(defn local-video-track
+  [call-id]
+  (first (video-tracks (local-stream call-id))))
+
+(defn remote-video-track
+  [call-id]
+  (first (video-tracks (remote-stream call-id))))
+
+(defn ^:async stop-local!
+  [call-id]
+  (when-let [stream (local-stream call-id)]
+    (await (bridge.MediaHelper/stopStream stream))
+    (state/update-resource! call-id assoc :local-stream nil)))

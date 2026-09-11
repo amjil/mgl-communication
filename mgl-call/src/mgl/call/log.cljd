@@ -1,0 +1,29 @@
+(ns mgl.call.log
+  "Simple leveled logging. Never logs tokens, SDP, or TURN credentials.")
+
+(defonce ^:private !level (atom :info))
+
+(def ^:private levels
+  {:debug 10
+   :info 20
+   :warn 30
+   :error 40})
+
+(defn set-level!
+  "Set log level: :debug :info :warn :error"
+  [level]
+  (reset! !level (or level :info)))
+
+(defn- enabled? [level]
+  (>= (get levels level 99)
+      (get levels @!level 20)))
+
+(defn- emit! [level xs]
+  (when (enabled? level)
+    (dart:core/print
+     (apply str "[mgl-call/" (name level) "] " xs))))
+
+(defn debug [& xs] (emit! :debug xs))
+(defn info [& xs] (emit! :info xs))
+(defn warn [& xs] (emit! :warn xs))
+(defn error [& xs] (emit! :error xs))

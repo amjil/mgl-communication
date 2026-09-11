@@ -1,0 +1,55 @@
+(ns mgl.call.session
+  "CallSession map factory (spec §10). Prefer maps over records."
+  (:require
+   ["dart:core" :as dart :refer [DateTime]]
+   ["package:uuid/uuid.dart" :as uuid]))
+
+(def ^:private !uuid (uuid/Uuid.))
+
+(defn new-call-id
+  "Generate a unique call id. Prefer server-provided ids when available."
+  []
+  (str "call_" (.v4 !uuid)))
+
+(defn now-ms []
+  (.-millisecondsSinceEpoch (DateTime/now)))
+
+(defn create
+  "Create a new CallSession map.
+
+   Required keys in opts:
+   - :call-id (optional — generated when missing)
+   - :direction :incoming | :outgoing
+   - :media-type :audio | :video
+   - :caller / :callee maps (optional)
+   - :remote-user (optional convenience)"
+  [opts]
+  (let [media (or (:media-type opts) :audio)
+        video? (= media :video)
+        call-id (or (:call-id opts) (new-call-id))
+        direction (or (:direction opts) :outgoing)
+        remote (or (:remote-user opts)
+                   (if (= direction :outgoing)
+                     (:callee opts)
+                     (:caller opts)))]
+    {:call-id call-id
+     :state (or (:state opts) :idle)
+     :direction direction
+     :media-type media
+     :caller (:caller opts)
+     :callee (:callee opts)
+     :remote-user remote
+     :local-audio-enabled? true
+     :local-video-enabled? video?
+     :remote-audio-enabled? true
+     :remote-video-enabled? video?
+     :speaker-enabled? false
+     :camera-facing :front
+     :connection-state :new
+     :ice-state :new
+     :signaling-state :stable
+     :created-at (now-ms)
+     :connected-at nil
+     :ended-at nil
+     :duration 0
+     :error nil}))

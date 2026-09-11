@@ -1,0 +1,48 @@
+(ns mgl.call.permissions
+  "Microphone / camera permission helpers (spec §37)."
+  (:require
+   ["package:mgl_call/mgl_call.dart" :as bridge]
+   [mgl.call.log :as log]))
+
+(defn- ->kw [s]
+  (case s
+    "authorized" :authorized
+    "denied" :denied
+    "restricted" :restricted
+    :unknown))
+
+(defn ^:async microphone-permission []
+  (->kw (await (bridge/microphonePermission))))
+
+(defn ^:async camera-permission []
+  (->kw (await (bridge/cameraPermission))))
+
+(defn ^:async request-microphone-permission! []
+  (let [st (->kw (await (bridge/requestMicrophonePermission)))]
+    (log/info "microphone permission=" st)
+    st))
+
+(defn ^:async request-camera-permission! []
+  (let [st (->kw (await (bridge/requestCameraPermission)))]
+    (log/info "camera permission=" st)
+    st))
+
+(defn ^:async ensure-for-media!
+  "Request required permissions for :audio or :video media type.
+   Returns {:ok true} or an error map."
+  [media-type]
+  (let [mic (await (request-microphone-permission!))]
+    (cond
+      (not= mic :authorized)
+      {:error {:code :microphone-permission-denied
+               :message "Microphone permission denied"}}
+
+      (= media-type :video)
+      (let [cam (await (request-camera-permission!))]
+        (if (= cam :authorized)
+          {:ok true}
+          {:error {:code :camera-permission-denied
+                   :message "Camera permission denied"}}))
+
+      :else
+      {:ok true})))
