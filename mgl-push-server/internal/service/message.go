@@ -91,6 +91,8 @@ func (s *MessageService) Send(ctx context.Context, in SendMessageInput) (*SendMe
 		return nil, err
 	}
 
+	// Fast path for sequential retries (already committed). Concurrent races are
+	// handled atomically by CreateWithIdempotency below.
 	if in.IdempotencyKey != "" {
 		if existing, err := s.messages.FindByIdempotencyKey(ctx, in.AppID, in.IdempotencyKey); err != nil {
 			return nil, err
@@ -135,13 +137,19 @@ func (s *MessageService) Send(ctx context.Context, in SendMessageInput) (*SendMe
 	}
 	enrichEventData(msg)
 
-	created, err := s.messages.Create(ctx, msg)
-	if err != nil {
-		return nil, err
-	}
-
+	var created *domain.Message
 	if in.IdempotencyKey != "" {
-		if err := s.messages.SaveIdempotencyKey(ctx, in.AppID, in.IdempotencyKey, created.ID); err != nil {
+		var isNew bool
+		created, isNew, err = s.messages.CreateWithIdempotency(ctx, msg, in.IdempotencyKey)
+		if err != nil {
+			return nil, err
+		}
+		if !isNew {
+			return &SendMessageResult{MessageID: created.ID, Accepted: true, Duplicate: true}, nil
+		}
+	} else {
+		created, err = s.messages.Create(ctx, msg)
+		if err != nil {
 			return nil, err
 		}
 	}

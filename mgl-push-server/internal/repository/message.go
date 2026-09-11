@@ -9,6 +9,7 @@ import (
 	"github.com/amjil/mgl-push/mgl-push-server/internal/domain"
 	"github.com/amjil/mgl-push/mgl-push-server/internal/idgen"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -21,6 +22,77 @@ func NewMessageRepository(db *pgxpool.Pool) *MessageRepository {
 }
 
 func (r *MessageRepository) Create(ctx context.Context, m *domain.Message) (*domain.Message, error) {
+	return r.create(ctx, r.db, m)
+}
+
+// CreateWithIdempotency atomically creates a message and binds an idempotency key
+// in one transaction, respecting the FK from idempotency_keys → push_messages.
+//
+// On success: (createdMessage, true, nil).
+// On duplicate key: (&domain.Message{ID: existingID}, false, nil).
+func (r *MessageRepository) CreateWithIdempotency(ctx context.Context, m *domain.Message, key string) (*domain.Message, bool, error) {
+	if key == "" {
+		created, err := r.Create(ctx, m)
+		return created, true, err
+	}
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	defer tx.Rollback(ctx)
+
+	// Fast path / wait for in-flight commit: FOR SHARE blocks while another
+	// transaction holds the row; empty result does not serialize newcomers.
+	var existingID string
+	err = tx.QueryRow(ctx, `
+SELECT message_id FROM idempotency_keys
+WHERE app_id = $1 AND idempotency_key = $2
+FOR SHARE
+`, m.AppID, key).Scan(&existingID)
+	if err == nil {
+		return &domain.Message{ID: existingID}, false, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, err
+	}
+
+	created, err := r.create(ctx, tx, m)
+	if err != nil {
+		return nil, false, err
+	}
+
+	_, err = tx.Exec(ctx, `
+INSERT INTO idempotency_keys (idempotency_key, app_id, message_id, created_at)
+VALUES ($1, $2, $3, $4)
+`, key, m.AppID, created.ID, time.Now().UTC())
+	if err != nil {
+		if isUniqueViolation(err) {
+			// Concurrent winner committed; roll back our message insert and return theirs.
+			_ = tx.Rollback(ctx)
+			existingID, findErr := r.FindByIdempotencyKey(ctx, m.AppID, key)
+			if findErr != nil {
+				return nil, false, findErr
+			}
+			if existingID == "" {
+				return nil, false, err
+			}
+			return &domain.Message{ID: existingID}, false, nil
+		}
+		return nil, false, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, false, err
+	}
+	return created, true, nil
+}
+
+type dbQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func (r *MessageRepository) create(ctx context.Context, q dbQuerier, m *domain.Message) (*domain.Message, error) {
 	now := time.Now().UTC()
 	if m.ID == "" {
 		m.ID = idgen.New()
@@ -46,7 +118,7 @@ func (r *MessageRepository) Create(ctx context.Context, m *domain.Message) (*dom
 		ttlSeconds = &s
 	}
 
-	const q = `
+	const insertQ = `
 INSERT INTO push_messages (
   id, app_id, type, title, body, data, image_url, priority, ttl_seconds,
   collapse_key, sound, badge, deep_link, category, status, created_at
@@ -56,11 +128,16 @@ INSERT INTO push_messages (
 RETURNING id, app_id, type, title, body, data, image_url, priority, ttl_seconds,
   collapse_key, sound, badge, deep_link, category, status, created_at, queued_at, completed_at
 `
-	return scanMessage(r.db.QueryRow(ctx, q,
+	return scanMessage(q.QueryRow(ctx, insertQ,
 		m.ID, m.AppID, string(m.Type), nullStr(m.Title), nullStr(m.Body), dataJSON, nullStr(m.ImageURL),
 		m.Priority, ttlSeconds, nullStr(m.CollapseKey), nullStr(m.Sound), m.Badge,
 		nullStr(m.DeepLink), nullStr(m.Category), m.Status, m.CreatedAt,
 	))
+}
+
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
 func (r *MessageRepository) MarkQueued(ctx context.Context, id string) error {
@@ -153,15 +230,6 @@ SELECT message_id FROM idempotency_keys WHERE app_id = $1 AND idempotency_key = 
 		return "", nil
 	}
 	return messageID, err
-}
-
-func (r *MessageRepository) SaveIdempotencyKey(ctx context.Context, appID, key, messageID string) error {
-	_, err := r.db.Exec(ctx, `
-INSERT INTO idempotency_keys (idempotency_key, app_id, message_id, created_at)
-VALUES ($1, $2, $3, $4)
-ON CONFLICT (app_id, idempotency_key) DO NOTHING
-`, key, appID, messageID, time.Now().UTC())
-	return err
 }
 
 func scanMessage(row scannable) (*domain.Message, error) {
