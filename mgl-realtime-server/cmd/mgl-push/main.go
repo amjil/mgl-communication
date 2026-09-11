@@ -70,9 +70,9 @@ func main() {
 	worker.Start(ctx)
 
 	bus := events.NewBus(512)
-	presenceStore := presence.NewStore(bus)
 	jwtValidator := auth.NewJWTValidator(cfg.JWTSecret, cfg.JWTIssuer)
 
+	// 1. 初始化 Redis Client 及分布式总线
 	var redisBus *events.RedisBus
 	var redisClient *redis.Client
 	if cfg.RedisURL != "" {
@@ -101,13 +101,20 @@ func main() {
 	}
 	sfuSvc := sfu.NewService(sfuProvider, cfg.ICEServers)
 
-	var callStore call.Store = call.NewMemoryStore()
+	// 2. 初始化 Presence 与 Call Store
+	var presenceStore presence.Store
+	var callStore call.Store
+
 	if redisClient != nil {
+		presenceStore = presence.NewRedisStore(redisClient, bus, cfg.PresenceIdleAfter)
 		callStore = call.NewRedisStore(redisClient)
-		logger.Info("call runtime store: redis")
+		logger.Info("runtime state store: redis (cluster mode enabled)")
 	} else {
-		logger.Warn("call runtime store: memory (process-local; set MGL_PUSH_REDIS_URL for cluster)")
+		presenceStore = presence.NewMemoryStore(bus)
+		callStore = call.NewMemoryStore()
+		logger.Warn("runtime state store: memory (process-local only)")
 	}
+
 	callRuntime := call.NewService(callStore, bus, cfg.CallRingTimeout)
 	orchestrator := &call.Orchestrator{
 		Runtime:    callRuntime,

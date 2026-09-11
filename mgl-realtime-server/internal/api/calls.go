@@ -188,7 +188,7 @@ func (s *Server) handleGetPresence(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := r.PathValue("user_id")
-	writeJSON(w, http.StatusOK, s.presence.GetUser(appID, userID))
+	writeJSON(w, http.StatusOK, s.presence.GetUser(r.Context(), appID, userID))
 }
 
 func (s *Server) withActor(w http.ResponseWriter, r *http.Request, fn func(ctx context.Context, callID, userID, deviceID string) (*call.Call, error)) {

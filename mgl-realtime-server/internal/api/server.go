@@ -24,7 +24,7 @@ type Server struct {
 	devices  *service.DeviceService
 	messages *service.MessageService
 	calls    *call.Orchestrator
-	presence *presence.Store
+	presence presence.Store
 	incoming *incomingcall.Service
 	hub      *wshub.Hub
 	db       *pgxpool.Pool
@@ -37,7 +37,7 @@ type Deps struct {
 	Devices  *service.DeviceService
 	Messages *service.MessageService
 	Calls    *call.Orchestrator
-	Presence *presence.Store
+	Presence presence.Store
 	Incoming *incomingcall.Service
 	Hub      *wshub.Hub
 	DB       *pgxpool.Pool

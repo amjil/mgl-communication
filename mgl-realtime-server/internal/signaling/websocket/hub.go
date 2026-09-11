@@ -54,7 +54,7 @@ type userSub struct {
 
 type Hub struct {
 	jwt      *auth.JWTValidator
-	presence *presence.Store
+	presence presence.Store
 	calls    CallAPI
 	incoming IncomingNotifier
 	bus      *events.Bus
@@ -82,7 +82,7 @@ type HubConfig struct {
 
 func NewHub(
 	jwt *auth.JWTValidator,
-	presenceStore *presence.Store,
+	presenceStore presence.Store,
 	calls CallAPI,
 	incoming IncomingNotifier,
 	bus *events.Bus,
@@ -178,7 +178,7 @@ func (h *Hub) unregister(c *connection.Conn) {
 	}
 
 	if c.Authenticated() && h.presence != nil {
-		up := h.presence.SetOffline(c.AppID, c.UserID, c.DeviceID)
+		up := h.presence.SetOffline(context.Background(), c.AppID, c.UserID, c.DeviceID)
 		h.broadcastPresence(up)
 	}
 	if h.bus != nil && c.Authenticated() {
@@ -380,7 +380,7 @@ func (h *Hub) handleAuth(c *connection.Conn, raw []byte) {
 	}
 
 	if h.presence != nil {
-		up := h.presence.SetOnline(appID, claims.Subject, deviceID)
+		up := h.presence.SetOnline(context.Background(), appID, claims.Subject, deviceID)
 		h.broadcastPresence(up)
 	}
 	if h.bus != nil {
