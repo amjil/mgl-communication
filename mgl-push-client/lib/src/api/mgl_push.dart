@@ -21,6 +21,10 @@ abstract class MglPush {
 
   Future<PushCapabilities> getCapabilities();
 
+  /// Dismiss / end System Call UI for [callId] (CallKit / Android Incoming Call).
+  /// When [callId] is null, ends all active system calls.
+  Future<void> endSystemCall([String? callId]);
+
   /// Domain + lifecycle events (notification, silent, incoming-call, token_changed, …).
   Stream<PushEvent> get events;
 

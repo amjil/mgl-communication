@@ -31,8 +31,8 @@ class EventBuffer {
 
   bool _shouldAccept(PushEvent event) {
     if (event is DomainPushEvent) {
-      // Drop expired incoming calls (spec §42).
-      if (event.isIncomingCall) {
+      // Drop expired incoming calls (spec §42) — but keep Accept/Reject actions.
+      if (event.isIncomingCall && event.isRinging) {
         final expires = int.tryParse(event.data['expires_at'] ?? '');
         if (expires != null) {
           final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -43,6 +43,7 @@ class EventBuffer {
         eventId: event.id,
         callId: event.callId,
         eventType: event.type,
+        callAction: event.callAction,
       );
     }
     return true;

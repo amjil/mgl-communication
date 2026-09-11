@@ -58,3 +58,16 @@ func MessageNotFound() *AppError {
 func Internal(msg string) *AppError {
 	return NewAppError(ErrCodeInternalError, msg, 500)
 }
+
+func IsNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	ae, ok := err.(*AppError)
+	if !ok {
+		return false
+	}
+	return ae.Code == ErrCodeDeviceNotFound ||
+		ae.Code == ErrCodeCallNotFound ||
+		ae.Code == ErrCodeMessageNotFound
+}

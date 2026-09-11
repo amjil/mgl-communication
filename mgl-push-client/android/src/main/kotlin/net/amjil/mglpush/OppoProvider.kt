@@ -261,7 +261,7 @@ object OppoBridge {
         if (p != null) {
             p.onMessage(message)
         } else {
-            PendingNativeStore.saveProviderMessage(appContext, "oppo", message)
+            IncomingCallColdStart.saveAndMaybeShow(appContext, "oppo", message)
         }
     }
 

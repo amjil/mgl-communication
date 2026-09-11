@@ -125,8 +125,10 @@ Namespaces: `mgl.push.api` · `core` · `events` · `config` · `device` · `tok
 1. Xcode → Push Notifications
 2. Incoming Call: enable **VoIP** capability (PushKit)
 3. Plugin swizzles AppDelegate and registers `PKPushRegistry`
-4. VoIP push → `incoming-call` DomainPushEvent; **CallKit belongs to mgl-call**
+4. VoIP push → LCK (when available on iOS 17.4+) or CallKit system call UI → `incoming-call` DomainPushEvent; after Accept, `data.action=accepted`, then hand off to mgl-call for media setup
 5. Silent / background: `content-available` + AppDelegate remote-notification forwarding
+6. App may call `endSystemCall(callId)` to dismiss the system call UI (e.g. call-ended)
+7. iOS `register()` registers both `apns` and `apns_voip` device rows (same `installation_id`)
 
 Optional manual forwarding:
 

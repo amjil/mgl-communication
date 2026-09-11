@@ -2,7 +2,8 @@
   "Re-exports core API for convenience (spec §12)."
   (:require
    [mgl.push.core :as core]
-   [mgl.push.events :as events]))
+   [mgl.push.events :as events]
+   [mgl.push.incoming-call :as incoming]))
 
 (def create core/create)
 (def init! core/init!)
@@ -18,6 +19,8 @@
 (def clear-user-id core/clear-user-id)
 (def request-permission! core/request-permission!)
 (def request-permission core/request-permission)
+(def end-system-call! core/end-system-call!)
+(def end-system-call core/end-system-call)
 (def capabilities core/capabilities)
 (def messages core/messages)
 (def events-stream core/events)
@@ -40,3 +43,9 @@
 (def event-data events/event-data)
 (def call-id events/call-id)
 (def ->map events/->map)
+
+(def call-data incoming/call-data)
+(def call-action incoming/call-action)
+(def ringing? incoming/ringing?)
+(def accepted? incoming/accepted?)
+(def rejected? incoming/rejected?)

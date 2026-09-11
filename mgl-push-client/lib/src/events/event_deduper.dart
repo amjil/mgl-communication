@@ -12,10 +12,14 @@ class EventDeduper {
   final Map<String, DateTime> _seenCalls = {};
 
   /// Returns true if this event should be delivered (not a duplicate).
+  ///
+  /// Incoming-call with `action` (accepted / rejected / timeout) is allowed
+  /// after the ringing event for the same call_id.
   bool accept({
     required String eventId,
     String? callId,
     String? eventType,
+    String? callAction,
   }) {
     _purge();
     final now = DateTime.now();
@@ -25,10 +29,14 @@ class EventDeduper {
       _seenEvents[eventId] = now;
     }
 
+    final isIncoming =
+        eventType == 'incoming-call' || eventType == 'incoming_call';
+    final isRinging = callAction == null ||
+        callAction.isEmpty ||
+        callAction == 'ringing';
+
     // Incoming call: only one ringing per call_id.
-    if (callId != null &&
-        callId.isNotEmpty &&
-        (eventType == 'incoming-call' || eventType == 'incoming_call')) {
+    if (callId != null && callId.isNotEmpty && isIncoming && isRinging) {
       if (_seenCalls.containsKey(callId)) return false;
       _seenCalls[callId] = now;
     }

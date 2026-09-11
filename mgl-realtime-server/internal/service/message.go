@@ -87,20 +87,12 @@ func (s *MessageService) Send(ctx context.Context, in SendMessageInput) (*SendMe
 			in.Type = domain.MessageNotification
 		}
 	}
+
 	if err := validateSend(in); err != nil {
 		return nil, err
 	}
 
-	// Fast path for sequential retries (already committed). Concurrent races are
-	// handled atomically by CreateWithIdempotency below.
-	if in.IdempotencyKey != "" {
-		if existing, err := s.messages.FindByIdempotencyKey(ctx, in.AppID, in.IdempotencyKey); err != nil {
-			return nil, err
-		} else if existing != "" {
-			return &SendMessageResult{MessageID: existing, Accepted: true, Duplicate: true}, nil
-		}
-	}
-
+	// 1. Resolve devices early; reject invalid targets before persisting.
 	devices, err := s.resolveDevices(ctx, in.AppID, in.UserIDs, in.InstallationIDs)
 	if err != nil {
 		return nil, err
@@ -109,6 +101,7 @@ func (s *MessageService) Send(ctx context.Context, in SendMessageInput) (*SendMe
 		return nil, domain.InvalidRequest("no active devices found for targets")
 	}
 
+	// 2. Initialize the Message entity.
 	msg := &domain.Message{
 		ID:          idgen.New(),
 		Type:        in.Type,
@@ -125,6 +118,7 @@ func (s *MessageService) Send(ctx context.Context, in SendMessageInput) (*SendMe
 		Category:    in.Category,
 		Status:      domain.MessageStatusCreated,
 	}
+
 	if in.TTLSeconds != nil {
 		msg.TTL = time.Duration(*in.TTLSeconds) * time.Second
 	}
@@ -135,25 +129,36 @@ func (s *MessageService) Send(ctx context.Context, in SendMessageInput) (*SendMe
 			msg.Priority = domain.PriorityNormal
 		}
 	}
+
+	// Provide a normalized payload for clients.
 	enrichEventData(msg)
 
-	var created *domain.Message
+	var createdID string
+
+	// 3. Persist safely (with or without idempotency).
 	if in.IdempotencyKey != "" {
-		var isNew bool
-		created, isNew, err = s.messages.CreateWithIdempotency(ctx, msg, in.IdempotencyKey)
+		actualMsgID, isNew, err := s.messages.CreateWithMessageAndIdempotency(ctx, msg, in.IdempotencyKey)
 		if err != nil {
 			return nil, err
 		}
 		if !isNew {
-			return &SendMessageResult{MessageID: created.ID, Accepted: true, Duplicate: true}, nil
+			// Concurrent insert or prior record; treat as duplicate.
+			return &SendMessageResult{MessageID: actualMsgID, Accepted: true, Duplicate: true}, nil
 		}
+		createdID = actualMsgID
 	} else {
-		created, err = s.messages.Create(ctx, msg)
+		// Fallback create when no IdempotencyKey is provided.
+		created, err := s.messages.Create(ctx, msg)
 		if err != nil {
 			return nil, err
 		}
+		createdID = created.ID
 	}
 
+	// Align in-memory ID with the persisted ID.
+	msg.ID = createdID
+
+	// 4. Continue: direct provider push and/or enqueue.
 	if in.Provider != "" && in.Token != "" {
 		tmp, err := s.devices.Upsert(ctx, &domain.Device{
 			InstallationID: "direct-" + idgen.New(),
@@ -169,12 +174,12 @@ func (s *MessageService) Send(ctx context.Context, in SendMessageInput) (*SendMe
 		devices = []*domain.Device{tmp}
 	}
 
-	if err := s.enqueueDeliveries(ctx, in.AppID, created, devices); err != nil {
+	if err := s.enqueueDeliveries(ctx, in.AppID, msg, devices); err != nil {
 		return nil, err
 	}
 
-	metrics.MessagesTotal.WithLabelValues(in.AppID, string(created.Type)).Inc()
-	return &SendMessageResult{MessageID: created.ID, Accepted: true}, nil
+	metrics.MessagesTotal.WithLabelValues(in.AppID, string(msg.Type)).Inc()
+	return &SendMessageResult{MessageID: createdID, Accepted: true}, nil
 }
 
 func (s *MessageService) SendIncomingCall(ctx context.Context, in SendIncomingCallInput) (*SendMessageResult, error) {
@@ -262,6 +267,7 @@ func (s *MessageService) SendCallSignal(ctx context.Context, in SendCallSignalIn
 }
 
 func (s *MessageService) enqueueDeliveries(ctx context.Context, appID string, created *domain.Message, devices []*domain.Device) error {
+	devices = filterDevicesForMessage(devices, created.Type)
 	var deliveries []*domain.Delivery
 	for _, d := range devices {
 		provider := selectProviderForMessage(d, created)
@@ -278,6 +284,64 @@ func (s *MessageService) enqueueDeliveries(ctx context.Context, appID string, cr
 		return err
 	}
 	return s.messages.MarkQueued(ctx, created.ID)
+}
+
+// filterDevicesForMessage avoids duplicate iOS deliveries when both apns and
+// apns_voip rows share an installation_id.
+func filterDevicesForMessage(devices []*domain.Device, msgType domain.MessageType) []*domain.Device {
+	if len(devices) == 0 {
+		return devices
+	}
+	incoming := msgType == domain.MessageIncomingCall ||
+		msgType == domain.MessageCallCancelled ||
+		msgType == domain.MessageCallEnded
+
+	byInstall := map[string][]*domain.Device{}
+	var order []string
+	for _, d := range devices {
+		key := d.AppID + "|" + d.InstallationID
+		if _, ok := byInstall[key]; !ok {
+			order = append(order, key)
+		}
+		byInstall[key] = append(byInstall[key], d)
+	}
+
+	var out []*domain.Device
+	for _, key := range order {
+		group := byInstall[key]
+		if len(group) == 1 || group[0].Platform != domain.PlatformIOS {
+			out = append(out, group...)
+			continue
+		}
+		var voip, apns, other []*domain.Device
+		for _, d := range group {
+			switch d.Provider {
+			case domain.ProviderAPNsVoIP:
+				voip = append(voip, d)
+			case domain.ProviderAPNs:
+				apns = append(apns, d)
+			default:
+				other = append(other, d)
+			}
+		}
+		if incoming {
+			if len(voip) > 0 {
+				out = append(out, voip...)
+			} else {
+				out = append(out, apns...)
+				out = append(out, other...)
+			}
+		} else {
+			if len(apns) > 0 {
+				out = append(out, apns...)
+			} else if len(other) > 0 {
+				out = append(out, other...)
+			} else {
+				out = append(out, voip...)
+			}
+		}
+	}
+	return out
 }
 
 func selectProviderForMessage(d *domain.Device, msg *domain.Message) string {

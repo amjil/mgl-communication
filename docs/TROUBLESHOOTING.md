@@ -75,8 +75,8 @@ Client must listen for `token_changed` (auto after `initialize`) and `PUT /v1/de
 ## Incoming Call missing / disappears immediately
 
 - Check whether `expires_at` has passed (client drops expired events)
-- iOS: VoIP token / PushKit present? CallKit UI belongs to **mgl-call**
-- Android: cold start must call `consumePendingEvents` (`initialize` does this automatically)
+- iOS: VoIP token / PushKit present? Has CallKit been reported? Did `endSystemCall` / `call-cancelled` dismiss the system UI?
+- Android: full-screen Incoming Call UI / notification channel `mgl_incoming_call`; cold start needs `USE_FULL_SCREEN_INTENT`
 - Multi-device: after one answers, server sends stop-ringing / `call-cancelled`
 
 ## Duplicate incoming-call UI

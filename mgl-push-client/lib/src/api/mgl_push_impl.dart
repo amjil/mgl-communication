@@ -87,18 +87,21 @@ class MglPushImpl implements MglPush {
             '/v1/devices/${device.installationId}/token',
             {'provider': event.provider, 'token': event.token},
           );
-          _device = PushDevice(
-            installationId: device.installationId,
-            platform: device.platform,
-            provider: event.provider,
-            token: event.token,
-            appId: device.appId,
-            appVersion: device.appVersion,
-            osVersion: device.osVersion,
-            deviceModel: device.deviceModel,
-            locale: device.locale,
-            timezone: device.timezone,
-          );
+          // Keep primary device as non-VoIP when VoIP token refreshes.
+          if (event.provider != 'apns_voip') {
+            _device = PushDevice(
+              installationId: device.installationId,
+              platform: device.platform,
+              provider: event.provider,
+              token: event.token,
+              appId: device.appId,
+              appVersion: device.appVersion,
+              osVersion: device.osVersion,
+              deviceModel: device.deviceModel,
+              locale: device.locale,
+              timezone: device.timezone,
+            );
+          }
         } catch (e) {
           _channel.inject(ErrorEvent(
             code: 'TOKEN_SYNC_FAILED',
@@ -138,18 +141,33 @@ class MglPushImpl implements MglPush {
     final prefs = await SharedPreferences.getInstance();
     final userId = prefs.getString(_prefUserId);
 
+    final capabilities = [
+      if (caps.notification) 'notification',
+      if (caps.silentPush) 'silent',
+      if (caps.backgroundPush) 'background',
+      if (caps.incomingCallPush) 'incoming_call',
+    ];
+
     final body = {
       ...device.toJson(),
       if (userId != null && userId.isNotEmpty) 'user_id': userId,
       'providers': caps.providers,
-      'capabilities': [
-        if (caps.notification) 'notification',
-        if (caps.silentPush) 'silent',
-        if (caps.backgroundPush) 'background',
-        if (caps.incomingCallPush) 'incoming_call',
-      ],
+      'capabilities': capabilities,
     };
     await _postJson('/v1/devices', body);
+
+    // iOS: register PushKit VoIP token as a separate apns_voip device row.
+    final voipToken = native['voip_token'] as String?;
+    if (device.platform == 'ios' &&
+        voipToken != null &&
+        voipToken.isNotEmpty) {
+      await _postJson('/v1/devices', {
+        ...body,
+        'provider': 'apns_voip',
+        'token': voipToken,
+      });
+    }
+
     _device = device;
     return device;
   }
@@ -211,6 +229,13 @@ class MglPushImpl implements MglPush {
   @override
   Future<void> requestPermission() async {
     await _channel.invoke('requestPermission');
+  }
+
+  @override
+  Future<void> endSystemCall([String? callId]) async {
+    await _channel.invoke('endSystemCall', {
+      if (callId != null && callId.isNotEmpty) 'callId': callId,
+    });
   }
 
   @override

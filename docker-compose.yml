@@ -13,6 +13,7 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./mgl-realtime-server/migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
       - ./mgl-realtime-server/migrations/002_v21_events.sql:/docker-entrypoint-initdb.d/002_v21_events.sql:ro
+      - ./mgl-realtime-server/migrations/003_dual_provider.sql:/docker-entrypoint-initdb.d/003_dual_provider.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U mglpush -d mglpush"]
       interval: 5s

@@ -93,6 +93,6 @@ export MGL_PUSH_VIVO_APP_SECRET=…
 |------------|-------|
 | `notification` | All vendors |
 | `silent` / `background` | Subject to OS policy; execution not guaranteed |
-| `incoming_call` | iOS uses VoIP; Android high-priority data / vendor channel; **not** the same as CallKit availability |
+| `incoming_call` | iOS uses VoIP; Android high-priority data / vendor channel; capability ≠ LCK/CallKit UI readiness (that is mgl-push Incoming Call layer) |
 
 Full env vars: [DEPLOYMENT.md](DEPLOYMENT.md) and [`.env.example`](../.env.example).

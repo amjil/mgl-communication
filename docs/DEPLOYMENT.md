@@ -11,10 +11,10 @@ docker compose up --build -d
 
 Services:
 
-- `postgres:16` — init mounts `migrations/001_init.sql` + `002_v21_events.sql`
+- `postgres:16` — init mounts `migrations/001_init.sql` + `002_v21_events.sql` + `003_dual_provider.sql`
 - `mgl-communication` — default `http://localhost:8080`, `dev-token` → `net.amjil.demo`
 
-> **Note:** init SQL runs only on **first create of an empty volume**. For existing data, run `002_v21_events.sql` manually.
+> **Note:** init SQL runs only on **first create of an empty volume**. For existing data, run newer migrations manually (`002_v21_events.sql`, `003_dual_provider.sql`).
 
 ## Binary
 

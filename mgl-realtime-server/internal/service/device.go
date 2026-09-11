@@ -74,7 +74,40 @@ func (s *DeviceService) UpdateToken(ctx context.Context, appID, installationID, 
 	if provider != "" && !allowedProviders[provider] {
 		return nil, domain.InvalidRequest("invalid provider")
 	}
-	return s.repo.UpdateToken(ctx, appID, installationID, provider, token)
+	d, err := s.repo.UpdateToken(ctx, appID, installationID, provider, token)
+	if err == nil {
+		return d, nil
+	}
+	if !domain.IsNotFound(err) || provider == "" {
+		return nil, err
+	}
+	// Token refresh for a provider row that does not exist yet (e.g. late VoIP token).
+	existing, getErr := s.repo.FindByInstallationID(ctx, appID, installationID)
+	platform := domain.PlatformIOS
+	userID := ""
+	appVersion, osVersion, deviceModel, locale, timezone := "", "", "", "", ""
+	if getErr == nil && existing != nil {
+		platform = existing.Platform
+		userID = existing.UserID
+		appVersion = existing.AppVersion
+		osVersion = existing.OSVersion
+		deviceModel = existing.DeviceModel
+		locale = existing.Locale
+		timezone = existing.Timezone
+	}
+	return s.Register(ctx, RegisterDeviceInput{
+		InstallationID: installationID,
+		UserID:         userID,
+		Platform:       platform,
+		Provider:       provider,
+		Token:          token,
+		AppID:          appID,
+		AppVersion:     appVersion,
+		OSVersion:      osVersion,
+		DeviceModel:    deviceModel,
+		Locale:         locale,
+		Timezone:       timezone,
+	})
 }
 
 func (s *DeviceService) SetUserID(ctx context.Context, appID, installationID, userID string) error {

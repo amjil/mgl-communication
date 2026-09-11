@@ -144,7 +144,7 @@ object HuaweiBridge {
         if (p != null) {
             p.onMessage(message)
         } else {
-            PendingNativeStore.saveProviderMessage(appContext, "huawei", message)
+            IncomingCallColdStart.saveAndMaybeShow(appContext, "huawei", message)
         }
     }
 }

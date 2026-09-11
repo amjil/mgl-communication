@@ -238,7 +238,7 @@ object VivoBridge {
         if (p != null) {
             p.onMessage(message)
         } else {
-            PendingNativeStore.saveProviderMessage(appContext, "vivo", message)
+            IncomingCallColdStart.saveAndMaybeShow(appContext, "vivo", message)
         }
     }
 

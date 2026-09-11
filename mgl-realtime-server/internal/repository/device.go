@@ -39,10 +39,9 @@ INSERT INTO devices (
 ) VALUES (
   $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16
 )
-ON CONFLICT (installation_id) DO UPDATE SET
+ON CONFLICT (installation_id, provider) DO UPDATE SET
   user_id = COALESCE(EXCLUDED.user_id, devices.user_id),
   platform = EXCLUDED.platform,
-  provider = EXCLUDED.provider,
   token = EXCLUDED.token,
   app_id = EXCLUDED.app_id,
   app_version = EXCLUDED.app_version,
@@ -72,6 +71,8 @@ SELECT id, user_id, installation_id, platform, provider, token,
   status, created_at, updated_at, last_seen_at
 FROM devices
 WHERE installation_id = $1 AND app_id = $2
+ORDER BY CASE WHEN provider = 'apns_voip' THEN 1 ELSE 0 END, updated_at DESC
+LIMIT 1
 `
 	d, err := scanDevice(r.db.QueryRow(ctx, q, installationID, appID))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -81,15 +82,34 @@ WHERE installation_id = $1 AND app_id = $2
 }
 
 func (r *DeviceRepository) UpdateToken(ctx context.Context, appID, installationID, provider, token string) (*domain.Device, error) {
-	const q = `
-UPDATE devices SET provider = $3, token = $4, status = 'active',
-  updated_at = $5, last_seen_at = $5
+	now := time.Now().UTC()
+	if provider == "" {
+		// Legacy: update the single/primary row for this installation.
+		const q = `
+UPDATE devices SET token = $3, status = 'active',
+  updated_at = $4, last_seen_at = $4
 WHERE installation_id = $1 AND app_id = $2
 RETURNING id, user_id, installation_id, platform, provider, token,
   app_id, app_version, os_version, device_model, locale, timezone,
   status, created_at, updated_at, last_seen_at
 `
-	d, err := scanDevice(r.db.QueryRow(ctx, q, installationID, appID, provider, token, time.Now().UTC()))
+		d, err := scanDevice(r.db.QueryRow(ctx, q, installationID, appID, token, now))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, domain.DeviceNotFound()
+		}
+		return d, err
+	}
+
+	// Prefer updating the matching provider row (apns vs apns_voip).
+	const q = `
+UPDATE devices SET token = $4, status = 'active',
+  updated_at = $5, last_seen_at = $5
+WHERE installation_id = $1 AND app_id = $2 AND provider = $3
+RETURNING id, user_id, installation_id, platform, provider, token,
+  app_id, app_version, os_version, device_model, locale, timezone,
+  status, created_at, updated_at, last_seen_at
+`
+	d, err := scanDevice(r.db.QueryRow(ctx, q, installationID, appID, provider, token, now))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.DeviceNotFound()
 	}

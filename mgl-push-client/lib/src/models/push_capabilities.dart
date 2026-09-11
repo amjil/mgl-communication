@@ -1,10 +1,13 @@
-/// Device push capabilities (spec §17). Does not include CallKit / WebRTC.
+/// Device push + Incoming Call capabilities (spec §17 / §95).
 class PushCapabilities {
   const PushCapabilities({
     this.notification = true,
     this.silentPush = true,
     this.backgroundPush = true,
     this.incomingCallPush = false,
+    this.callkit = false,
+    this.liveCommunicationKit = false,
+    this.telecom = false,
     this.providers = const [],
   });
 
@@ -12,6 +15,16 @@ class PushCapabilities {
   final bool silentPush;
   final bool backgroundPush;
   final bool incomingCallPush;
+
+  /// iOS CallKit available (Call Control).
+  final bool callkit;
+
+  /// iOS LiveCommunicationKit available when present.
+  final bool liveCommunicationKit;
+
+  /// Android Incoming Call UI / Telecom-style Call Control.
+  final bool telecom;
+
   final List<String> providers;
 
   Map<String, dynamic> toJson() => {
@@ -19,6 +32,9 @@ class PushCapabilities {
         'silent_push': silentPush,
         'background_push': backgroundPush,
         'incoming_call_push': incomingCallPush,
+        'callkit': callkit,
+        'live_communication_kit': liveCommunicationKit,
+        'telecom': telecom,
         'providers': providers,
       };
 
@@ -38,6 +54,11 @@ class PushCapabilities {
       incomingCallPush: map['incoming_call_push'] as bool? ??
           map['incomingCallPush'] as bool? ??
           false,
+      callkit: map['callkit'] as bool? ?? false,
+      liveCommunicationKit: map['live_communication_kit'] as bool? ??
+          map['liveCommunicationKit'] as bool? ??
+          false,
+      telecom: map['telecom'] as bool? ?? false,
       providers: providers,
     );
   }

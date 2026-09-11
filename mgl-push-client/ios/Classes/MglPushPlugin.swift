@@ -3,6 +3,7 @@ import PushKit
 import UIKit
 import UserNotifications
 import ObjectiveC
+import CallKit
 
 public class MglPushPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, UNUserNotificationCenterDelegate, PKPushRegistryDelegate {
   private var methodChannel: FlutterMethodChannel?
@@ -14,6 +15,7 @@ public class MglPushPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, UNUse
   private var voipRegistry: PKPushRegistry?
   private var voipToken: String?
   private let pendingStore = PendingEventStore()
+  private let incomingCalls = IncomingCallManager.shared
 
   public static func register(with registrar: FlutterPluginRegistrar) {
     let instance = MglPushPlugin()
@@ -38,10 +40,12 @@ public class MglPushPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, UNUse
       apnsProvider.initialize { [weak self] event in
         self?.emit(event)
       }
+      incomingCalls.onEvent = { [weak self] event in
+        self?.emit(event)
+      }
       setupPushKit()
       result(nil)
     case "register":
-      // Prefer VoIP token for incoming-call capability when available; else APNs.
       let token = apnsProvider.getToken() ?? ""
       result([
         "platform": "ios",
@@ -75,20 +79,25 @@ public class MglPushPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, UNUse
       pendingEvents.removeAll()
       result(all)
     case "getCapabilities":
-      var providers = ["apns"]
-      if voipToken != nil {
-        providers.append("apns_voip")
-      } else {
-        // Advertise capability even before token; server decides transport.
-        providers.append("apns_voip")
-      }
       result([
         "notification": true,
         "silent_push": true,
         "background_push": true,
         "incoming_call_push": true,
-        "providers": providers
+        "callkit": incomingCalls.callKitAvailable,
+        "live_communication_kit": incomingCalls.liveCommunicationKitAvailable,
+        "telecom": false,
+        "providers": ["apns", "apns_voip"]
       ])
+    case "endSystemCall":
+      let args = call.arguments as? [String: Any]
+      let callId = args?["callId"] as? String ?? args?["call_id"] as? String
+      if let callId, !callId.isEmpty {
+        incomingCalls.endCall(callId: callId, reason: .remoteEnded)
+      } else {
+        incomingCalls.endAll(reason: .remoteEnded)
+      }
+      result(nil)
     default:
       result(FlutterMethodNotImplemented)
     }
@@ -130,12 +139,41 @@ public class MglPushPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, UNUse
       completion()
       return
     }
-    emit(domainEvent(from: payload.dictionaryPayload, defaultType: "incoming-call", provider: "apns_voip"))
-    // CallKit / LCK belongs to mgl-call — we only deliver the event.
-    completion()
+
+    let event = domainEvent(from: payload.dictionaryPayload, defaultType: "incoming-call", provider: "apns_voip")
+    let eventType = event["type"] as? String ?? "incoming-call"
+    let data = (event["data"] as? [String: String]) ?? [:]
+    let eventId = (event["id"] as? String) ?? ""
+
+    switch eventType {
+    case "call-cancelled", "call-ended":
+      if let callId = data["call_id"] ?? data["callId"] {
+        let reason: CXCallEndedReason = eventType == "call-cancelled" ? .unanswered : .remoteEnded
+        incomingCalls.endCall(callId: callId, reason: reason)
+      }
+      emit(event)
+      completion()
+    default:
+      // Call Control: report System Call UI before PushKit completion (Apple requirement).
+      emit(event)
+      incomingCalls.reportIncoming(
+        data: data,
+        eventId: eventId,
+        providerName: "apns_voip",
+        completion: completion
+      )
+    }
   }
 
   private func emit(_ event: [String: Any?]) {
+    if let type = event["type"] as? String,
+       type == "call-cancelled" || type == "call-ended",
+       let data = event["data"] as? [String: String],
+       let callId = data["call_id"] ?? data["callId"] {
+      let reason: CXCallEndedReason = type == "call-cancelled" ? .unanswered : .remoteEnded
+      incomingCalls.endCall(callId: callId, reason: reason)
+    }
+
     pendingStore.save(event)
     if let sink = eventSink {
       sink(event)
@@ -186,7 +224,6 @@ public class MglPushPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, UNUse
     completionHandler()
   }
 
-  /// Background / silent push (content-available).
   @objc public func handleRemoteNotification(_ userInfo: [AnyHashable: Any], fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
     emit(domainEvent(from: userInfo, defaultType: "silent", provider: "apns"))
     completionHandler(.newData)

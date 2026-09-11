@@ -9,13 +9,15 @@
              │                         │
        mgl-push Client          mgl-call Client
        Push / Device            WebRTC / Media
+       Incoming Call            Room / Participant
+       (LCK / CallKit / UI)
              │                         │
              └────────────┬────────────┘
                           ▼
                 mgl-realtime-server (Go)
                 ├── Push · Device · Queue
                 ├── Presence · Call Runtime
-                ├── Incoming Call
+                ├── Incoming Call (delivery only; no LCK)
                 ├── WebSocket Signaling
                 └── SFU Integration
                           │
@@ -25,6 +27,7 @@
 ```
 
 Design principle: **Go owns realtime; Phoenix owns business; SFU owns media.**  
+Client principle: **LCK/CallKit = Call Control（mgl-push）；flutter_webrtc = Media（mgl-call）。**  
 See also: [`docs/REALTIME.md`](REALTIME.md).
 
 ## Push pipeline (persisted)
@@ -125,11 +128,15 @@ ring all devices → accept on one
 ## Boundary with mgl-call
 
 ```text
-mgl-push  →  PushEvent(incoming-call)  →  Application  →  mgl-call
+Go  →  VoIP Push  →  mgl-push  →  LCK/CallKit  →  System UI
+                                              →  Accept
+                                              →  Application  →  mgl-call  →  flutter_webrtc
 mgl-call  ↔  WebSocket Signaling / Call Runtime  ↔  Go Server
 ```
 
 - mgl-push does not `require` mgl-call
 - mgl-call does not hard-depend on mgl-push (foreground can use WS alone)
-- CallKit / LCK / Telecom / WebRTC belong to mgl-call
+- CallKit / LCK / Telecom belong to **mgl-push**（Call Control）
+- WebRTC / Room / Media belong to **mgl-call**
+- Go does not call LCK/CallKit; only Push + call state (`created` / `ringing` / `accepted` / `rejected` / `ended`)
 - Go does not implement SFU / RTP / Codec

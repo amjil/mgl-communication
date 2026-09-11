@@ -1,5 +1,5 @@
 (ns mgl.push.incoming-call
-  "Incoming call push event helpers (mgl-call integration boundary)."
+  "Incoming call push + Call Control helpers (mgl-call integration boundary)."
   (:require [mgl.push.events :as e]))
 
 (def incoming-call? e/incoming-call?)
@@ -12,3 +12,24 @@
   [event]
   (when (e/incoming-call? event)
     (e/event-data event)))
+
+(defn call-action
+  "System Call UI action: \"accepted\" | \"rejected\" | \"timeout\" | nil (ringing)."
+  [event]
+  (when (e/incoming-call? event)
+    (let [d (e/event-data event)]
+      (get d "action"))))
+
+(defn ringing?
+  [event]
+  (and (e/incoming-call? event)
+       (let [a (call-action event)]
+         (or (nil? a) (= a "ringing")))))
+
+(defn accepted?
+  [event]
+  (= "accepted" (call-action event)))
+
+(defn rejected?
+  [event]
+  (= "rejected" (call-action event)))

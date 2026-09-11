@@ -25,67 +25,62 @@ func (r *MessageRepository) Create(ctx context.Context, m *domain.Message) (*dom
 	return r.create(ctx, r.db, m)
 }
 
-// CreateWithIdempotency atomically creates a message and binds an idempotency key
-// in one transaction, respecting the FK from idempotency_keys → push_messages.
-//
-// On success: (createdMessage, true, nil).
-// On duplicate key: (&domain.Message{ID: existingID}, false, nil).
-func (r *MessageRepository) CreateWithIdempotency(ctx context.Context, m *domain.Message, key string) (*domain.Message, bool, error) {
-	if key == "" {
-		created, err := r.Create(ctx, m)
-		return created, true, err
-	}
-
+// CreateWithMessageAndIdempotency atomically checks the idempotency key and inserts the message.
+// If the key already exists, it returns the existing messageID and false (not newly created).
+// Otherwise it creates the message and idempotency record in the same transaction, returning the new messageID and true.
+func (r *MessageRepository) CreateWithMessageAndIdempotency(ctx context.Context, m *domain.Message, key string) (string, bool, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
-		return nil, false, err
+		return "", false, err
 	}
 	defer tx.Rollback(ctx)
 
-	// Fast path / wait for in-flight commit: FOR SHARE blocks while another
-	// transaction holds the row; empty result does not serialize newcomers.
-	var existingID string
+	// 1. Look up the idempotency key with a share lock.
+	var existingMessageID string
 	err = tx.QueryRow(ctx, `
 SELECT message_id FROM idempotency_keys
 WHERE app_id = $1 AND idempotency_key = $2
 FOR SHARE
-`, m.AppID, key).Scan(&existingID)
+`, m.AppID, key).Scan(&existingMessageID)
+
 	if err == nil {
-		return &domain.Message{ID: existingID}, false, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return nil, false, err
+		// Key already exists; return the bound message_id.
+		return existingMessageID, false, nil
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return "", false, err
 	}
 
+	// 2. Key does not exist; persist the Message.
 	created, err := r.create(ctx, tx, m)
 	if err != nil {
-		return nil, false, err
+		return "", false, err
 	}
 
-	_, err = tx.Exec(ctx, `
-INSERT INTO idempotency_keys (idempotency_key, app_id, message_id, created_at)
-VALUES ($1, $2, $3, $4)
-`, key, m.AppID, created.ID, time.Now().UTC())
+	// 3. Insert the idempotency binding (FK is satisfied because push_messages already exists).
+	const qKey = `INSERT INTO idempotency_keys (idempotency_key, app_id, message_id, created_at) VALUES ($1, $2, $3, $4)`
+	_, err = tx.Exec(ctx, qKey, key, m.AppID, created.ID, time.Now().UTC())
 	if err != nil {
 		if isUniqueViolation(err) {
 			// Concurrent winner committed; roll back our message insert and return theirs.
 			_ = tx.Rollback(ctx)
 			existingID, findErr := r.FindByIdempotencyKey(ctx, m.AppID, key)
 			if findErr != nil {
-				return nil, false, findErr
+				return "", false, findErr
 			}
 			if existingID == "" {
-				return nil, false, err
+				return "", false, err
 			}
-			return &domain.Message{ID: existingID}, false, nil
+			return existingID, false, nil
 		}
-		return nil, false, err
+		return "", false, err
 	}
 
+	// Commit the transaction.
 	if err := tx.Commit(ctx); err != nil {
-		return nil, false, err
+		return "", false, err
 	}
-	return created, true, nil
+
+	return created.ID, true, nil
 }
 
 type dbQuerier interface {

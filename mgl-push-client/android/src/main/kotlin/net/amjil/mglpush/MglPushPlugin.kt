@@ -65,11 +65,18 @@ class MglPushPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, EventChann
         eventChannel = EventChannel(binding.binaryMessenger, "net.amjil.mgl_push/events")
         methodChannel.setMethodCallHandler(this)
         eventChannel.setStreamHandler(this)
+        IncomingCallActionBridge.plugin = this
+        IncomingCallNotifier.ensureChannel(binding.applicationContext)
+        MglConnectionServiceAppContext.set(binding.applicationContext)
+        TelecomIncomingCall.ensurePhoneAccount(binding.applicationContext)
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         methodChannel.setMethodCallHandler(null)
         eventChannel.setStreamHandler(null)
+        if (IncomingCallActionBridge.plugin === this) {
+            IncomingCallActionBridge.plugin = null
+        }
         context = null
     }
 
@@ -141,22 +148,43 @@ class MglPushPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, EventChann
                 all.addAll(stored)
                 all.addAll(pendingEvents)
                 pendingEvents.clear()
+                // Replay Incoming Call UI for still-ringing pending events.
+                for (event in all) {
+                    maybeShowIncomingCall(event)
+                }
                 result.success(all)
             }
             "getCapabilities" -> {
                 val names = availableProviders.map { it.name() }.ifEmpty {
                     listOf(activeProvider?.name() ?: "fcm")
                 }
+                val telecom = context?.let { TelecomIncomingCall.isAvailable(it) } == true
                 result.success(mapOf(
                     "notification" to true,
                     "silent_push" to true,
                     "background_push" to true,
                     "incoming_call_push" to true,
+                    "callkit" to false,
+                    "live_communication_kit" to false,
+                    "telecom" to telecom,
                     "providers" to names
                 ))
             }
+            "endSystemCall" -> {
+                val callId = call.argument<String>("callId") ?: call.argument<String>("call_id")
+                val ctx = context
+                if (ctx != null) {
+                    IncomingCallNotifier.dismiss(ctx, callId)
+                }
+                result.success(null)
+            }
             else -> result.notImplemented()
         }
+    }
+
+    /** Used by [IncomingCallActionBridge] when Flutter engine is alive. */
+    fun emitFromNative(event: Map<String, Any?>) {
+        emit(event)
     }
 
     private fun initializeProviders() {
@@ -186,6 +214,7 @@ class MglPushPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, EventChann
     }
 
     private fun emit(event: Map<String, Any?>) {
+        handleCallControl(event)
         PendingNativeStore.save(context, event)
         val sink = eventSink
         if (sink != null) {
@@ -193,6 +222,51 @@ class MglPushPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, EventChann
         } else {
             pendingEvents.add(event)
         }
+    }
+
+    private fun handleCallControl(event: Map<String, Any?>) {
+        val ctx = context ?: return
+        when (event["type"] as? String) {
+            "incoming-call" -> {
+                val data = event["data"]
+                val action = if (data is Map<*, *>) data["action"]?.toString() else null
+                // Only show UI for ringing (no action yet).
+                if (action.isNullOrEmpty() || action == "ringing") {
+                    maybeShowIncomingCall(event)
+                } else {
+                    val callId = callIdOf(event)
+                    IncomingCallNotifier.dismiss(ctx, callId)
+                }
+            }
+            "call-cancelled", "call-ended" -> {
+                IncomingCallNotifier.dismiss(ctx, callIdOf(event))
+            }
+        }
+    }
+
+    private fun maybeShowIncomingCall(event: Map<String, Any?>) {
+        if (event["type"] != "incoming-call") return
+        val data = event["data"]
+        val action = if (data is Map<*, *>) data["action"]?.toString() else null
+        if (!action.isNullOrEmpty() && action != "ringing") return
+        val ctx = context ?: return
+        if (isExpired(event)) return
+        IncomingCallNotifier.show(ctx, event)
+    }
+
+    private fun callIdOf(event: Map<String, Any?>): String? {
+        val data = event["data"]
+        if (data is Map<*, *>) {
+            return data["call_id"]?.toString() ?: data["callId"]?.toString()
+        }
+        return null
+    }
+
+    private fun isExpired(event: Map<String, Any?>): Boolean {
+        val data = event["data"] as? Map<*, *> ?: return false
+        val expires = data["expires_at"]?.toString()?.toLongOrNull() ?: return false
+        val now = System.currentTimeMillis() / 1000
+        return now > expires
     }
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {

@@ -61,6 +61,23 @@ void main() {
     expect(d.accept(eventId: 'e3', callId: 'c2', eventType: 'incoming-call'), isTrue);
   });
 
+  test('EventDeduper allows accepted action after ringing', () {
+    final d = EventDeduper();
+    expect(
+      d.accept(eventId: 'e1', callId: 'c1', eventType: 'incoming-call'),
+      isTrue,
+    );
+    expect(
+      d.accept(
+        eventId: 'e1:accepted',
+        callId: 'c1',
+        eventType: 'incoming-call',
+        callAction: 'accepted',
+      ),
+      isTrue,
+    );
+  });
+
   test('EventBuffer drops expired incoming-call', () async {
     final buffer = EventBuffer();
     buffer.add(DomainPushEvent(

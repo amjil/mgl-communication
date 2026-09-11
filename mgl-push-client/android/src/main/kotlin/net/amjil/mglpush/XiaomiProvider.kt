@@ -224,7 +224,7 @@ object XiaomiBridge {
         if (p != null) {
             p.onMessage(message)
         } else {
-            PendingNativeStore.saveProviderMessage(appContext, "xiaomi", message)
+            IncomingCallColdStart.saveAndMaybeShow(appContext, "xiaomi", message)
         }
     }
 }

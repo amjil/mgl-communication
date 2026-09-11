@@ -68,14 +68,24 @@ You can also pass an explicit `client` as the first argument (multi-instance):
   (push/on-event ::mgl-call
     (fn [event]
       (cond
+        ;; System Call Accept → start media in mgl-call
+        (and (push/incoming-call? event)
+             (= "accepted" (get (push/event-data event) "action")))
+        (call/accept! (push/event-data event))
+
+        ;; Ringing only (optional); System Call UI is already shown by mgl-push native
         (push/incoming-call? event)
-        (call/incoming! (push/event-data event))
+        nil
 
         (push/call-cancelled? event)
-        (call/cancel! (push/call-id event))
+        (do
+          (push/end-system-call! (push/call-id event))
+          (call/cancel! (push/call-id event)))
 
         (push/call-ended? event)
-        …
+        (do
+          (push/end-system-call! (push/call-id event))
+          …)
 
         (push/notification? event)
         …

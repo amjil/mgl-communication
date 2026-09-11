@@ -125,10 +125,16 @@
           (event/emit-type! :call-cancelled call-id))
         (cleanup-call! call-id))
 
-      (:call.end "call.end" :call.ended "call.ended")
+      (:call.end "call.end" :call.ended "call.ended" :call.hangup "call.hangup")
       (when c
         (when (state/set-call-state! call-id :ended)
           (event/emit-type! :call-ended call-id))
+        (cleanup-call! call-id))
+
+      (:call.stop-ringing "call.stop_ringing")
+      (when (and c (= :ringing (:state c)))
+        (when (state/set-call-state! call-id :cancelled)
+          (event/emit-type! :call-cancelled call-id))
         (cleanup-call! call-id))
 
       (:webrtc.offer "webrtc.offer")
@@ -139,7 +145,7 @@
       (when call-id
         (handle-remote-answer! call-id (:sdp msg)))
 
-      (:webrtc.ice-candidate "webrtc.ice-candidate")
+      (:webrtc.ice-candidate "webrtc.ice-candidate" "webrtc.ice_candidate")
       (when call-id
         (handle-remote-ice! call-id
                             {:candidate (:candidate msg)
@@ -147,25 +153,25 @@
                              :sdpMLineIndex (or (:sdpMLineIndex msg)
                                                 (:sdp-m-line-index msg))}))
 
-      (:call.mute "call.mute")
+      (:call.mute "call.mute" "media.mute")
       (when c
         (state/update-call! call-id assoc :remote-audio-enabled? false)
         (event/emit-type! :remote-audio-changed call-id
                           {:remote-audio-enabled? false}))
 
-      (:call.unmute "call.unmute")
+      (:call.unmute "call.unmute" "media.unmute")
       (when c
         (state/update-call! call-id assoc :remote-audio-enabled? true)
         (event/emit-type! :remote-audio-changed call-id
                           {:remote-audio-enabled? true}))
 
-      (:call.video-off "call.video-off")
+      (:call.video-off "call.video-off" "media.camera_off")
       (when c
         (state/update-call! call-id assoc :remote-video-enabled? false)
         (event/emit-type! :remote-video-changed call-id
                           {:remote-video-enabled? false}))
 
-      (:call.video-on "call.video-on")
+      (:call.video-on "call.video-on" "media.camera_on")
       (when c
         (state/update-call! call-id assoc :remote-video-enabled? true)
         (event/emit-type! :remote-video-changed call-id
@@ -202,6 +208,7 @@
    Config keys:
    - :user-id
    - :access-token
+   - :device-id       (optional; authenticate handshake)
    - :signaling-url  (or :signaling transport map)
    - :ice-servers
    - :ring-timeout-ms

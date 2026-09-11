@@ -13,7 +13,13 @@ Pod::Spec.new do |s|
   s.source_files     = 'Classes/**/*'
   s.dependency 'Flutter'
   s.platform = :ios, '13.0'
-  s.frameworks = 'PushKit', 'UserNotifications'
-  s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES' }
+  s.frameworks = 'PushKit', 'UserNotifications', 'CallKit', 'AVFoundation'
+  # LiveCommunicationKit (iOS 17.4+) — weak so older Xcode/SDK still compile.
+  s.weak_frameworks = 'LiveCommunicationKit'
+
+  s.pod_target_xcconfig = {
+    'DEFINES_MODULE' => 'YES',
+    'OTHER_LDFLAGS' => '$(inherited) -weak_framework LiveCommunicationKit'
+  }
   s.swift_version = '5.0'
 end

@@ -102,6 +102,18 @@
   ([client] (request-permission! client))
   ([] (request-permission!)))
 
+(defn end-system-call!
+  "Dismiss System Call UI (CallKit / Android Incoming Call) for call-id.
+   When call-id is nil, ends all active system calls."
+  ([client call-id]
+   (.endSystemCall ^push/MglPush client call-id))
+  ([call-id]
+   (end-system-call! (client!) call-id)))
+
+(defn end-system-call
+  ([client call-id] (end-system-call! client call-id))
+  ([call-id] (end-system-call! call-id)))
+
 (defn capabilities
   "Returns PushCapabilities (spec §17)."
   ([client] (.getCapabilities ^push/MglPush client))

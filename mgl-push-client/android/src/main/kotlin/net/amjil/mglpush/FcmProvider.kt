@@ -149,7 +149,7 @@ object FcmBridge {
         if (p != null) {
             p.onMessage(message)
         } else {
-            PendingNativeStore.saveProviderMessage(appContext, "fcm", message)
+            IncomingCallColdStart.saveAndMaybeShow(appContext, "fcm", message)
         }
     }
 }

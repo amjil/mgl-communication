@@ -6,8 +6,8 @@ Unified Device Push, Incoming Call Events, and Realtime Communication Infrastruc
 
 | Library | Responsibility |
 |---------|----------------|
-| **mgl-push** | Notify / Wake / Deliver Event |
-| **mgl-call** | Client WebRTC / Media / CallKit |
+| **mgl-push** | Notify / Wake / Deliver Event / Incoming Call（LCK · CallKit · Android Call UI） |
+| **mgl-call** | Client WebRTC / Media / Room / Participant |
 | **mgl-realtime-server** | Go Realtime Server: Push + Presence + Call Runtime + Signaling + SFU |
 
 Push and Call stay loosely coupled: cold-start wake uses **PushEvent** (`incoming-call` / `call-cancelled` / `call-ended`); foreground uses **WebSocket**.
@@ -33,9 +33,11 @@ mgl-communication/
 | Area | Scope | Status |
 |------|-------|--------|
 | **Push Phase 1–3** | Device, APNs/FCM, Huawei/Xiaomi/OPPO/vivo, Incoming Call Push | ✓ |
+| **Incoming Call UI** | iOS LCK (when available) · CallKit · Android Telecom / full-screen Call UI · Accept/Reject | ✓ |
 | **Realtime Phase 1–4** | JWT, WS, Presence, Call Runtime, 1:1/Group, Multi-device, Resume, rate limits | ✓ (single-node in-memory) |
 | **Realtime Phase 5** | Redis / horizontal scaling | ○ |
 | **mgl-call** | Client Signaling / WebRTC / Media | In-repo (`mgl-call/`) |
+
 
 ## Quick start
 
@@ -48,8 +50,8 @@ curl http://localhost:8080/health
 curl http://localhost:8080/ready
 ```
 
-> First startup runs `migrations/001_init.sql` and `002_v21_events.sql`.  
-> If you reuse an existing Postgres volume, apply `002_v21_events.sql` manually.
+> First startup runs `migrations/001_init.sql`, `002_v21_events.sql`, and `003_dual_provider.sql`.  
+> If you reuse an existing Postgres volume, apply newer migrations manually.
 
 ### Register a device
 
@@ -143,7 +145,13 @@ final caps = await push.getCapabilities();
 
 push.events.listen((e) {
   if (e is DomainPushEvent && e.isIncomingCall) {
-    // → mgl-call
+    if (e.isAccepted) {
+      // → mgl-call accept / join
+    } else if (e.isRinging) {
+      // System Call UI already shown by native mgl-push
+    } else if (e.isRejected) {
+      // user rejected
+    }
   }
 });
 ```

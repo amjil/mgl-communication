@@ -83,6 +83,7 @@ WS authenticate (JWT) | HTTP Bearer (service|JWT)
 |------|---------|
 | `migrations/001_init.sql` | devices / push_messages / push_deliveries / idempotency_keys |
 | `migrations/002_v21_events.sql` | `type`, idempotency, delivery accepted_at/failed_at |
+| `migrations/003_dual_provider.sql` | unique `(installation_id, provider)` for apns + apns_voip |
 
 Docker Compose mounts into `docker-entrypoint-initdb.d/` (**empty volume, first create only**). Existing volumes must run `002` manually.
 

@@ -34,6 +34,20 @@ class DomainPushEvent extends PushEvent {
   bool get isCallEnded => type == PushEventType.callEnded;
 
   String? get callId => data['call_id'] ?? data['callId'];
+
+  /// Call Control action from System Call UI: accepted / rejected / timeout / ringing.
+  String? get callAction {
+    final a = data['action'];
+    if (a == null || a.isEmpty) return null;
+    return a;
+  }
+
+  bool get isRinging =>
+      isIncomingCall && (callAction == null || callAction == 'ringing');
+
+  bool get isAccepted => callAction == 'accepted';
+  bool get isRejected => callAction == 'rejected';
+  bool get isTimeout => callAction == 'timeout';
 }
 
 /// Transport / lifecycle events (not part of the business PushEvent contract).

@@ -14,8 +14,8 @@ Core principle:
 | **Phoenix** | User, AuthZ business rules, Friendship, Groups, Call History |
 | **SFU (LiveKit, etc.)** | Media routing, A/V forwarding |
 | **coturn** | TURN Relay (Go only issues ICE config) |
-| **mgl-push Client** | Push Token, Incoming Call UI wake |
-| **mgl-call Client** | WebRTC, A/V, CallKit / LCK |
+| **mgl-push Client** | Push Token, VoIP Push, Incoming Call UI（LCK / CallKit / Android Call UI） |
+| **mgl-call Client** | WebRTC, A/V, Room, Participant, Media State |
 
 ## Architecture
 
