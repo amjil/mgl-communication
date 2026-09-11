@@ -33,6 +33,7 @@ import (
 	livekitpkg "github.com/amjil/mgl-communication/mgl-realtime-server/internal/sfu/livekit"
 	wshub "github.com/amjil/mgl-communication/mgl-realtime-server/internal/signaling/websocket"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -72,6 +73,25 @@ func main() {
 	presenceStore := presence.NewStore(bus)
 	jwtValidator := auth.NewJWTValidator(cfg.JWTSecret, cfg.JWTIssuer)
 
+	var redisBus *events.RedisBus
+	var redisClient *redis.Client
+	if cfg.RedisURL != "" {
+		opt, err := redis.ParseURL(cfg.RedisURL)
+		if err != nil {
+			logger.Error("redis url parse failed", "error", err)
+			os.Exit(1)
+		}
+		redisClient = redis.NewClient(opt)
+		if err := redisClient.Ping(ctx).Err(); err != nil {
+			logger.Error("redis ping failed", "error", err)
+			os.Exit(1)
+		}
+		redisBus = events.NewRedisBus(redisClient, logger)
+		logger.Info("redis pub/sub enabled", "url", cfg.RedisURL)
+	} else {
+		logger.Warn("MGL_PUSH_REDIS_URL unset; WebSocket delivery is process-local only")
+	}
+
 	var sfuProvider sfu.Provider = sfu.NewStub(cfg.LiveKitURL)
 	if cfg.LiveKitAPIKey != "" && cfg.LiveKitAPISecret != "" {
 		sfuProvider = livekitpkg.New(cfg.LiveKitURL, cfg.LiveKitAPIKey, cfg.LiveKitAPISecret)
@@ -107,6 +127,7 @@ func main() {
 		orchestrator,
 		incomingSvc,
 		bus,
+		redisBus,
 		logger,
 		wshub.HubConfig{
 			PingInterval:   cfg.WSPingInterval,
@@ -154,6 +175,9 @@ func main() {
 	_ = httpServer.Shutdown(shutdownCtx)
 	worker.Stop()
 	_ = registry.Close()
+	if redisClient != nil {
+		_ = redisClient.Close()
+	}
 	pool.Close()
 	logger.Info("bye")
 }

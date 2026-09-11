@@ -11,6 +11,7 @@ type Config struct {
 	Env         string
 	HTTPAddr    string
 	DatabaseURL string
+	RedisURL    string // optional; empty = local-only WS delivery
 
 	ServiceTokens map[string]string // token -> app_id
 
@@ -82,6 +83,7 @@ func Load() *Config {
 		Env:                      getenv("MGL_PUSH_ENV", "development"),
 		HTTPAddr:                 getenv("MGL_PUSH_HTTP_ADDR", ":8080"),
 		DatabaseURL:              getenv("MGL_PUSH_DATABASE_URL", "postgres://mglpush:mglpush@localhost:5432/mglpush?sslmode=disable"),
+		RedisURL:                 os.Getenv("MGL_PUSH_REDIS_URL"),
 		JWTSecret:                getenv("MGL_PUSH_JWT_SECRET", "dev-jwt-secret-change-me"),
 		JWTIssuer:                getenv("MGL_PUSH_JWT_ISSUER", "mgl-realtime"),
 		PhoenixBaseURL:           os.Getenv("MGL_PUSH_PHOENIX_BASE_URL"),

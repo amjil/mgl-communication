@@ -6,14 +6,15 @@ import (
 )
 
 // Event is an internal realtime event (spec §27).
+// JSON tags are required for Redis Pub/Sub serialization.
 type Event struct {
-	Type      string
-	AppID     string
-	UserID    string
-	DeviceID  string
-	CallID    string
-	Timestamp time.Time
-	Payload   map[string]any
+	Type      string         `json:"type"`
+	AppID     string         `json:"app_id"`
+	UserID    string         `json:"user_id"`
+	DeviceID  string         `json:"device_id,omitempty"`
+	CallID    string         `json:"call_id,omitempty"`
+	Timestamp time.Time      `json:"timestamp"`
+	Payload   map[string]any `json:"payload,omitempty"`
 }
 
 type Handler func(Event)
@@ -88,4 +89,8 @@ const (
 	PushRequested = "push.requested"
 	PushSent      = "push.sent"
 	PushFailed    = "push.failed"
+
+	// WSDeliver is published on user:{app_id}:{user_id} topics for cross-node WS fanout.
+	// Payload["envelope"] holds the protocol.Envelope JSON; DeviceID is except-device filter.
+	WSDeliver = "ws.deliver"
 )

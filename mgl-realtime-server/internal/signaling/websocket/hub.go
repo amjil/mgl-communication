@@ -47,12 +47,18 @@ type IncomingNotifier interface {
 	NotifyStopRinging(ctx context.Context, c *call.Call, userID, reason string)
 }
 
+type userSub struct {
+	cancel  context.CancelFunc
+	cleanup func()
+}
+
 type Hub struct {
 	jwt      *auth.JWTValidator
 	presence *presence.Store
 	calls    CallAPI
 	incoming IncomingNotifier
 	bus      *events.Bus
+	redisBus *events.RedisBus
 	logger   *slog.Logger
 
 	pingInterval time.Duration
@@ -61,9 +67,10 @@ type Hub struct {
 	msgLimiter  *ratelimit.Limiter
 	callLimiter *ratelimit.Limiter
 
-	mu     sync.RWMutex
-	conns  map[string]*connection.Conn            // connID
-	byUser map[string]map[string]*connection.Conn // app|user -> connID -> conn
+	mu       sync.RWMutex
+	conns    map[string]*connection.Conn            // connID
+	byUser   map[string]map[string]*connection.Conn // app|user -> connID -> conn
+	userSubs map[string]*userSub                    // app|user -> Redis subscription (ref by local conns)
 }
 
 type HubConfig struct {
@@ -79,6 +86,7 @@ func NewHub(
 	calls CallAPI,
 	incoming IncomingNotifier,
 	bus *events.Bus,
+	redisBus *events.RedisBus,
 	logger *slog.Logger,
 	cfg HubConfig,
 ) *Hub {
@@ -103,6 +111,7 @@ func NewHub(
 		calls:        calls,
 		incoming:     incoming,
 		bus:          bus,
+		redisBus:     redisBus,
 		logger:       logger,
 		pingInterval: cfg.PingInterval,
 		readTimeout:  cfg.ReadTimeout,
@@ -110,6 +119,7 @@ func NewHub(
 		callLimiter:  ratelimit.New(cfg.CallsPerMinute, time.Minute),
 		conns:        make(map[string]*connection.Conn),
 		byUser:       make(map[string]map[string]*connection.Conn),
+		userSubs:     make(map[string]*userSub),
 	}
 	if bus != nil {
 		bus.SubscribeAll(h.onEvent)
@@ -140,16 +150,27 @@ func (h *Hub) register(c *connection.Conn) {
 func (h *Hub) unregister(c *connection.Conn) {
 	h.mu.Lock()
 	delete(h.conns, c.ID)
+	var subToClose *userSub
 	if c.UserID != "" {
 		uk := c.AppID + "|" + c.UserID
 		if m := h.byUser[uk]; m != nil {
 			delete(m, c.ID)
 			if len(m) == 0 {
 				delete(h.byUser, uk)
+				// Last local connection for this user: drop Redis subscription.
+				if sub := h.userSubs[uk]; sub != nil {
+					delete(h.userSubs, uk)
+					subToClose = sub
+				}
 			}
 		}
 	}
 	h.mu.Unlock()
+
+	if subToClose != nil {
+		subToClose.cancel()
+		subToClose.cleanup()
+	}
 
 	if c.Authenticated() && h.presence != nil {
 		up := h.presence.SetOffline(c.AppID, c.UserID, c.DeviceID)
@@ -175,6 +196,50 @@ func (h *Hub) bindUser(c *connection.Conn) {
 		h.byUser[uk] = make(map[string]*connection.Conn)
 	}
 	h.byUser[uk][c.ID] = c
+}
+
+// ensureUserSubscription starts a Redis user-topic subscription when this node
+// gets the first local WebSocket for (appID, userID). Multi-device on the same
+// node shares one subscription.
+func (h *Hub) ensureUserSubscription(appID, userID string) {
+	if h.redisBus == nil {
+		return
+	}
+	uk := appID + "|" + userID
+	h.mu.Lock()
+	if _, ok := h.userSubs[uk]; ok {
+		h.mu.Unlock()
+		return
+	}
+	subCtx, cancel := context.WithCancel(context.Background())
+	eventCh, cleanup := h.redisBus.SubscribeUserTopic(subCtx, appID, userID)
+	h.userSubs[uk] = &userSub{cancel: cancel, cleanup: cleanup}
+	h.mu.Unlock()
+	go h.dispatchUserEvents(subCtx, appID, userID, eventCh)
+}
+
+// dispatchUserEvents fans Redis user-topic events out to local WebSocket conns.
+func (h *Hub) dispatchUserEvents(ctx context.Context, appID, userID string, eventCh <-chan events.Event) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case e, ok := <-eventCh:
+			if !ok {
+				return
+			}
+			if e.Type != events.WSDeliver {
+				continue
+			}
+			env, err := envelopeFromDeliverEvent(e)
+			if err != nil {
+				h.logger.Warn("failed to decode ws.deliver envelope",
+					"app_id", appID, "user_id", userID, "error", err)
+				continue
+			}
+			h.deliverLocal(appID, userID, e.DeviceID, env)
+		}
+	}
 }
 
 func (h *Hub) writePump(c *connection.Conn) {
@@ -277,6 +342,7 @@ func (h *Hub) handleAuth(c *connection.Conn, raw []byte) {
 	}
 	c.SetIdentity(claims.Subject, appID, deviceID)
 	h.bindUser(c)
+	h.ensureUserSubscription(appID, claims.Subject)
 
 	if data.Reconnect {
 		metrics.WebSocketReconnects.Inc()
@@ -519,14 +585,43 @@ func (h *Hub) broadcastPresence(up presence.UserPresence) {
 }
 
 func (h *Hub) sendToUser(appID, userID string, env protocol.Envelope) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	for _, c := range h.byUser[appID+"|"+userID] {
-		c.Send(env)
-	}
+	h.routeToUser(appID, userID, "", env)
 }
 
 func (h *Hub) sendToUserExceptDevice(appID, userID, exceptDevice string, env protocol.Envelope) {
+	h.routeToUser(appID, userID, exceptDevice, env)
+}
+
+// routeToUser publishes to Redis user topic when configured; otherwise delivers locally.
+// Redis Pub/Sub echoes to all subscribers (including this node), so local devices still receive.
+func (h *Hub) routeToUser(appID, userID, exceptDevice string, env protocol.Envelope) {
+	if h.redisBus == nil {
+		h.deliverLocal(appID, userID, exceptDevice, env)
+		return
+	}
+	envBytes, err := json.Marshal(env)
+	if err != nil {
+		h.logger.Error("marshal envelope for redis failed", "error", err)
+		h.deliverLocal(appID, userID, exceptDevice, env)
+		return
+	}
+	e := events.Event{
+		Type:     events.WSDeliver,
+		AppID:    appID,
+		UserID:   userID,
+		DeviceID: exceptDevice, // except-device filter for multi-device stop-ringing
+		Payload: map[string]any{
+			"envelope": string(envBytes),
+		},
+	}
+	if err := h.redisBus.Publish(context.Background(), events.UserTopic(appID, userID), e); err != nil {
+		h.logger.Error("redis publish failed; falling back to local delivery",
+			"app_id", appID, "user_id", userID, "error", err)
+		h.deliverLocal(appID, userID, exceptDevice, env)
+	}
+}
+
+func (h *Hub) deliverLocal(appID, userID, exceptDevice string, env protocol.Envelope) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for _, c := range h.byUser[appID+"|"+userID] {
@@ -535,6 +630,33 @@ func (h *Hub) sendToUserExceptDevice(appID, userID, exceptDevice string, env pro
 		}
 		c.Send(env)
 	}
+}
+
+func envelopeFromDeliverEvent(e events.Event) (protocol.Envelope, error) {
+	raw, ok := e.Payload["envelope"]
+	if !ok || raw == nil {
+		return protocol.Envelope{}, errMsg("missing envelope in ws.deliver payload")
+	}
+	var b []byte
+	switch v := raw.(type) {
+	case string:
+		b = []byte(v)
+	case json.RawMessage:
+		b = []byte(v)
+	case []byte:
+		b = v
+	default:
+		var err error
+		b, err = json.Marshal(v)
+		if err != nil {
+			return protocol.Envelope{}, err
+		}
+	}
+	var env protocol.Envelope
+	if err := json.Unmarshal(b, &env); err != nil {
+		return protocol.Envelope{}, err
+	}
+	return env, nil
 }
 
 func (h *Hub) onEvent(e events.Event) {
