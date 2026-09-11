@@ -168,8 +168,13 @@ func (h *Hub) unregister(c *connection.Conn) {
 	h.mu.Unlock()
 
 	if subToClose != nil {
-		subToClose.cancel()
-		subToClose.cleanup()
+		// Placeholder may still be empty while Redis Subscribe is in flight.
+		if subToClose.cancel != nil {
+			subToClose.cancel()
+		}
+		if subToClose.cleanup != nil {
+			subToClose.cleanup()
+		}
 	}
 
 	if c.Authenticated() && h.presence != nil {
@@ -201,20 +206,46 @@ func (h *Hub) bindUser(c *connection.Conn) {
 // ensureUserSubscription starts a Redis user-topic subscription when this node
 // gets the first local WebSocket for (appID, userID). Multi-device on the same
 // node shares one subscription.
+//
+// Redis Subscribe is done outside h.mu so lock contention does not stall all
+// Hub operations on network I/O. An empty placeholder prevents duplicate
+// concurrent subscriptions for the same user.
 func (h *Hub) ensureUserSubscription(appID, userID string) {
 	if h.redisBus == nil {
 		return
 	}
 	uk := appID + "|" + userID
+
 	h.mu.Lock()
 	if _, ok := h.userSubs[uk]; ok {
 		h.mu.Unlock()
 		return
 	}
+	// 1. Placeholder under lock: block other conns from double-subscribing.
+	placeholder := &userSub{}
+	h.userSubs[uk] = placeholder
+	h.mu.Unlock()
+
+	// 2. Network I/O outside the Hub lock.
 	subCtx, cancel := context.WithCancel(context.Background())
 	eventCh, cleanup := h.redisBus.SubscribeUserTopic(subCtx, appID, userID)
-	h.userSubs[uk] = &userSub{cancel: cancel, cleanup: cleanup}
+
+	h.mu.Lock()
+	// 3. Fill only if our placeholder is still present (not deleted/replaced).
+	if sub, ok := h.userSubs[uk]; ok && sub == placeholder {
+		sub.cancel = cancel
+		sub.cleanup = cleanup
+	} else {
+		// Unregister removed the slot, or another conn replaced it after a
+		// disconnect race. Roll back this Subscribe.
+		h.mu.Unlock()
+		cancel()
+		cleanup()
+		return
+	}
 	h.mu.Unlock()
+
+	// 4. Start fan-out after controllers are installed.
 	go h.dispatchUserEvents(subCtx, appID, userID, eventCh)
 }
 
