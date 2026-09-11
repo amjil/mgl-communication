@@ -8,6 +8,7 @@ class PushCapabilities {
     this.callkit = false,
     this.liveCommunicationKit = false,
     this.telecom = false,
+    this.fullScreenIntent = true,
     this.providers = const [],
   });
 
@@ -25,6 +26,9 @@ class PushCapabilities {
   /// Android Incoming Call UI / Telecom-style Call Control.
   final bool telecom;
 
+  /// Android 14+ USE_FULL_SCREEN_INTENT grant status (true on older APIs / iOS).
+  final bool fullScreenIntent;
+
   final List<String> providers;
 
   Map<String, dynamic> toJson() => {
@@ -35,6 +39,7 @@ class PushCapabilities {
         'callkit': callkit,
         'live_communication_kit': liveCommunicationKit,
         'telecom': telecom,
+        'full_screen_intent': fullScreenIntent,
         'providers': providers,
       };
 
@@ -59,6 +64,9 @@ class PushCapabilities {
           map['liveCommunicationKit'] as bool? ??
           false,
       telecom: map['telecom'] as bool? ?? false,
+      fullScreenIntent: map['full_screen_intent'] as bool? ??
+          map['fullScreenIntent'] as bool? ??
+          true,
       providers: providers,
     );
   }

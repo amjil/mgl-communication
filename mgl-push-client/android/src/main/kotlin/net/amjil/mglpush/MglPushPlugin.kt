@@ -1,20 +1,30 @@
 package net.amjil.mglpush
 
 import android.app.Activity
+import android.app.NotificationManager
 import android.content.Context
+import android.content.Intent
+import android.os.Build
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugin.common.PluginRegistry
 
-class MglPushPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, EventChannel.StreamHandler, ActivityAware {
+class MglPushPlugin :
+    FlutterPlugin,
+    MethodChannel.MethodCallHandler,
+    EventChannel.StreamHandler,
+    ActivityAware,
+    PluginRegistry.NewIntentListener {
 
     private lateinit var methodChannel: MethodChannel
     private lateinit var eventChannel: EventChannel
     private var context: Context? = null
     private var activity: Activity? = null
+    private var activityBinding: ActivityPluginBinding? = null
     private var eventSink: EventChannel.EventSink? = null
     private val pendingEvents = mutableListOf<Map<String, Any?>>()
 
@@ -159,6 +169,12 @@ class MglPushPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, EventChann
                     listOf(activeProvider?.name() ?: "fcm")
                 }
                 val telecom = context?.let { TelecomIncomingCall.isAvailable(it) } == true
+                val nm = context?.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                val canUseFullScreen = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    nm?.canUseFullScreenIntent() == true
+                } else {
+                    true
+                }
                 result.success(mapOf(
                     "notification" to true,
                     "silent_push" to true,
@@ -167,6 +183,7 @@ class MglPushPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, EventChann
                     "callkit" to false,
                     "live_communication_kit" to false,
                     "telecom" to telecom,
+                    "full_screen_intent" to canUseFullScreen,
                     "providers" to names
                 ))
             }
@@ -281,7 +298,37 @@ class MglPushPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, EventChann
 
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
         activity = binding.activity
-        binding.activity.intent?.extras?.let { extras ->
+        activityBinding = binding
+        binding.addOnNewIntentListener(this)
+        handleIntent(binding.activity.intent)
+    }
+
+    override fun onDetachedFromActivityForConfigChanges() {
+        activityBinding?.removeOnNewIntentListener(this)
+        activityBinding = null
+        activity = null
+    }
+
+    override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
+        activity = binding.activity
+        activityBinding = binding
+        binding.addOnNewIntentListener(this)
+    }
+
+    override fun onDetachedFromActivity() {
+        activityBinding?.removeOnNewIntentListener(this)
+        activityBinding = null
+        activity = null
+    }
+
+    override fun onNewIntent(intent: Intent): Boolean {
+        activity?.intent = intent
+        handleIntent(intent)
+        return false
+    }
+
+    private fun handleIntent(intent: Intent?) {
+        intent?.extras?.let { extras ->
             if (extras.containsKey("mgl_message_id") ||
                 extras.containsKey("mgl_event_id") ||
                 extras.containsKey("call_id") ||
@@ -297,17 +344,5 @@ class MglPushPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, EventChann
                 }
             }
         }
-    }
-
-    override fun onDetachedFromActivityForConfigChanges() {
-        activity = null
-    }
-
-    override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
-        activity = binding.activity
-    }
-
-    override fun onDetachedFromActivity() {
-        activity = null
     }
 }

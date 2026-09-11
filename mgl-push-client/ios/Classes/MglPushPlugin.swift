@@ -147,12 +147,19 @@ public class MglPushPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, UNUse
 
     switch eventType {
     case "call-cancelled", "call-ended":
-      if let callId = data["call_id"] ?? data["callId"] {
+      // Apple requires every VoIP push to report a CallKit call. If a cancel/end
+      // arrives on apns_voip (e.g. race with hangup), flash-report then hang up.
+      let callId = data["call_id"] ?? data["callId"] ?? eventId
+      incomingCalls.reportIncoming(
+        data: data,
+        eventId: eventId,
+        providerName: "apns_voip"
+      ) { [weak self] in
         let reason: CXCallEndedReason = eventType == "call-cancelled" ? .unanswered : .remoteEnded
-        incomingCalls.endCall(callId: callId, reason: reason)
+        self?.incomingCalls.endCall(callId: callId, reason: reason)
+        self?.emit(event)
+        completion()
       }
-      emit(event)
-      completion()
     default:
       // Call Control: report System Call UI before PushKit completion (Apple requirement).
       emit(event)
