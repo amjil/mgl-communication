@@ -16,6 +16,9 @@ class WebrtcPeer {
   RTCPeerConnection? _pc;
   MediaStream? _localStream;
   MediaStream? _remoteStream;
+  /// Serializes empty-stream track attachment so concurrent onTrack
+  /// callbacks share one MediaStream instead of overwriting each other.
+  Future<MediaStream>? _remoteStreamFuture;
 
   void Function(Map<String, dynamic> candidate)? onIceCandidate;
   void Function(String state)? onIceConnectionState;
@@ -70,14 +73,28 @@ class WebrtcPeer {
       final track = event.track;
       if (event.streams.isNotEmpty) {
         _remoteStream = event.streams.first;
+        _remoteStreamFuture = Future.value(_remoteStream);
         onTrack?.call(_remoteStream!, track);
-      } else {
-        createLocalMediaStream('remote').then((stream) {
-          stream.addTrack(track);
-          _remoteStream = stream;
-          onTrack?.call(stream, track);
-        });
+        return;
       }
+
+      final existing = _remoteStream;
+      if (existing != null) {
+        existing.addTrack(track);
+        onTrack?.call(existing, track);
+        return;
+      }
+
+      // Gate concurrent empty-stream onTrack callbacks on one Future so
+      // audio+video tracks attach to the same MediaStream.
+      _remoteStreamFuture ??= createLocalMediaStream('remote').then((stream) {
+        _remoteStream = stream;
+        return stream;
+      });
+      _remoteStreamFuture!.then((stream) {
+        stream.addTrack(track);
+        onTrack?.call(stream, track);
+      });
     };
   }
 
@@ -173,6 +190,7 @@ class WebrtcPeer {
       }
     } catch (_) {}
     _remoteStream = null;
+    _remoteStreamFuture = null;
 
     try {
       await _pc?.close();

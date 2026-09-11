@@ -4,6 +4,7 @@
    ["package:mgl_call/mgl_call.dart" :as bridge]
    [mgl.call.config :as config]
    [mgl.call.event :as event]
+   [mgl.call.lifecycle :as life]
    [mgl.call.log :as log]
    [mgl.call.signaling :as signaling]
    [mgl.call.state :as state]))
@@ -20,21 +21,49 @@
               (:credential s) (assoc "credential" (:credential s)))))
         (config/ice-servers)))
 
+(defn- candidate->dart [candidate]
+  {"candidate" (or (:candidate candidate) (get candidate "candidate"))
+   "sdpMid" (or (:sdpMid candidate) (:sdp-mid candidate)
+                (get candidate "sdpMid"))
+   "sdpMLineIndex" (or (:sdpMLineIndex candidate)
+                       (:sdp-m-line-index candidate)
+                       (get candidate "sdpMLineIndex"))})
+
+(defn- ^:async add-ice-candidate-now!
+  "Add a candidate immediately (remote description must already be set)."
+  [call-id candidate]
+  (when-let [peer (:peer (state/get-resource call-id))]
+    (await (.addIceCandidate peer (candidate->dart candidate)))))
+
+(defn- ^:async flush-ice-buffer!
+  "Drain :ice-buffer after remote description is applied."
+  [call-id]
+  (let [buf (vec (or (:ice-buffer (state/get-resource call-id)) []))]
+    (state/update-resource! call-id assoc :ice-buffer [])
+    (doseq [c buf]
+      (try
+        (await (add-ice-candidate-now! call-id c))
+        (catch Exception e
+          (log/warn "flush ice candidate failed call-id=" call-id " err=" e))))))
+
 (defn- on-ice-state! [call-id s]
   (state/update-call! call-id assoc :ice-state (keyword s))
   (case s
     "connected"
     (do (event/emit-type! :ice-connected call-id)
+        (life/cancel-timer! call-id :reconnect-timer)
         (when (= :reconnecting (:state (state/get-call call-id)))
           (when (state/set-call-state! call-id :connected)
             (event/emit-type! :call-connected call-id))))
     "completed"
-    (event/emit-type! :ice-connected call-id)
+    (do (event/emit-type! :ice-connected call-id)
+        (life/cancel-timer! call-id :reconnect-timer))
     "disconnected"
     (do (event/emit-type! :ice-disconnected call-id)
         (when (= :connected (:state (state/get-call call-id)))
           (when (state/set-call-state! call-id :reconnecting)
-            (event/emit-type! :call-reconnecting call-id))))
+            (event/emit-type! :call-reconnecting call-id
+                              {:reason :ice-disconnected}))))
     "failed"
     (event/emit-type! :ice-failed call-id)
     "checking"
@@ -47,6 +76,7 @@
     "connecting" (event/emit-type! :peer-connecting call-id)
     "connected"
     (do (event/emit-type! :peer-connected call-id)
+        (life/cancel-timer! call-id :reconnect-timer)
         (when (contains? #{:connecting :reconnecting}
                          (:state (state/get-call call-id)))
           (when (state/set-call-state! call-id :connected)
@@ -55,10 +85,12 @@
     (do (event/emit-type! :peer-disconnected call-id)
         (when (= :connected (:state (state/get-call call-id)))
           (when (state/set-call-state! call-id :reconnecting)
-            (event/emit-type! :call-reconnecting call-id))))
+            (event/emit-type! :call-reconnecting call-id
+                              {:reason :peer-disconnected}))))
     "failed"
     (when (contains? #{:connecting :connected :reconnecting}
                      (:state (state/get-call call-id)))
+      (life/cancel-timer! call-id :reconnect-timer)
       (when (state/set-call-state! call-id :failed)
         (event/emit-type! :call-failed call-id
                           {:error {:code :peer-connection-failed
@@ -88,7 +120,10 @@
                 (event/emit-type! :track-added call-id
                                   {:kind (.-kind track)})))]
     (await (.create peer .iceServers (ice-servers-list)))
-    (state/update-resource! call-id assoc :peer peer)
+    (state/update-resource! call-id assoc
+                            :peer peer
+                            :ice-buffer (or (:ice-buffer (state/get-resource call-id)) [])
+                            :remote-description-set? false)
     (log/info "PeerConnection created call-id=" call-id)
     peer))
 
@@ -118,22 +153,26 @@
 (defn ^:async set-remote-description!
   [call-id type sdp]
   (when-let [peer (peer call-id)]
-    (await (.setRemoteDescription peer type sdp))))
+    (await (.setRemoteDescription peer type sdp))
+    (state/update-resource! call-id assoc :remote-description-set? true)
+    (await (flush-ice-buffer! call-id))))
 
 (defn ^:async add-ice-candidate!
+  "Buffer candidates until remote description is set, then add to PC."
   [call-id candidate]
-  (when-let [peer (peer call-id)]
-    (let [m {"candidate" (or (:candidate candidate) (get candidate "candidate"))
-             "sdpMid" (or (:sdpMid candidate) (:sdp-mid candidate)
-                          (get candidate "sdpMid"))
-             "sdpMLineIndex" (or (:sdpMLineIndex candidate)
-                                 (:sdp-m-line-index candidate)
-                                 (get candidate "sdpMLineIndex"))}]
-      (await (.addIceCandidate peer m)))))
+  (if-not (:remote-description-set? (state/get-resource call-id))
+    (do
+      (state/update-resource! call-id update :ice-buffer (fnil conj []) candidate)
+      (log/debug "ice buffered call-id=" call-id
+                 " size=" (count (:ice-buffer (state/get-resource call-id))))
+      nil)
+    (await (add-ice-candidate-now! call-id candidate))))
 
 (defn ^:async close!
   [call-id]
   (when-let [peer (peer call-id)]
     (await (.close peer))
-    (state/update-resource! call-id dissoc :peer :local-stream :remote-stream)
+    (state/update-resource! call-id dissoc
+                            :peer :local-stream :remote-stream
+                            :ice-buffer :remote-description-set?)
     (log/info "PeerConnection closed call-id=" call-id)))

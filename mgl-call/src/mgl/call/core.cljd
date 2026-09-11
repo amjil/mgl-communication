@@ -17,7 +17,7 @@
    [mgl.call.video :as video]
    [mgl.call.webrtc :as webrtc]))
 
-(declare hangup! cleanup-call! fail-call!)
+(declare hangup! cleanup-call! fail-call! do-reconnect!)
 
 (defn- msg-type [msg]
   (let [t (:type msg)]
@@ -29,13 +29,24 @@
 (defn- ^:async handle-remote-offer! [call-id sdp]
   (state/update-resource! call-id assoc :pending-offer sdp)
   (when (webrtc/peer call-id)
-    (await (webrtc/set-remote-description! call-id "offer" sdp))))
+    (try
+      (await (webrtc/set-remote-description! call-id "offer" sdp))
+      (catch Exception e
+        (log/error "set remote offer failed call-id=" call-id " err=" e)
+        (fail-call! call-id :signaling-failed (str "Invalid remote offer: " e))))))
 
 (defn- ^:async handle-remote-answer! [call-id sdp]
-  (await (webrtc/set-remote-description! call-id "answer" sdp)))
+  (try
+    (await (webrtc/set-remote-description! call-id "answer" sdp))
+    (catch Exception e
+      (log/error "set remote answer failed call-id=" call-id " err=" e)
+      (fail-call! call-id :signaling-failed (str "Invalid remote answer: " e)))))
 
 (defn- ^:async handle-remote-ice! [call-id candidate]
-  (await (webrtc/add-ice-candidate! call-id candidate)))
+  (try
+    (await (webrtc/add-ice-candidate! call-id candidate))
+    (catch Exception e
+      (log/warn "add ice candidate failed call-id=" call-id " err=" e))))
 
 (defn- on-ring-timeout! [call-id]
   (when-let [c (state/get-call call-id)]
@@ -73,10 +84,65 @@
     (if (err/error? prep)
       (do (fail-call! call-id (err/code prep) (err/message prep))
           prep)
-      (let [offer (await (webrtc/create-offer! call-id))]
-        (signaling/webrtc-offer call-id (:sdp offer))
-        (life/start-connect-timeout! call-id #(on-connect-timeout! call-id))
-        {:ok true}))))
+      (try
+        (let [offer (await (webrtc/create-offer! call-id))]
+          (signaling/webrtc-offer call-id (:sdp offer))
+          (life/start-connect-timeout! call-id #(on-connect-timeout! call-id))
+          {:ok true})
+        (catch Exception e
+          (log/error "outgoing webrtc negotiate failed: " e)
+          (fail-call! call-id :signaling-failed (str e)))))))
+
+(defn- begin-reconnect!
+  "Start reconnect loop if one is not already in flight / scheduled."
+  [call-id]
+  (let [r (state/get-resource call-id)]
+    (when-not (or (:reconnect-timer r) (:reconnect-inflight? r))
+      (state/update-resource! call-id assoc :reconnect-inflight? true)
+      (do-reconnect! call-id 0))))
+
+(defn- ^:async do-reconnect!
+  "Unified reconnect loop: restore signaling and wait for ICE/PC recovery.
+   Uses lifecycle exponential backoff; fails the call when budget is exhausted."
+  [call-id attempt]
+  (try
+    (let [c (state/get-call call-id)]
+      (when (and c (= :reconnecting (:state c)))
+        (log/info "reconnect attempt=" attempt " call-id=" call-id)
+        (try
+          (await (signaling/connect!))
+          (catch Exception e
+            (log/warn "reconnect signaling connect failed: " e)))
+        (let [st (:state (state/get-call call-id))]
+          (cond
+            (nil? (state/get-call call-id)) nil
+            (= :connected st) nil
+            (contains? state/terminal-states st) nil
+            :else
+            (when-not (life/schedule-reconnect! call-id attempt
+                                                #(do-reconnect! call-id %))
+              (fail-call! call-id :signaling-failed "Reconnect exhausted"))))))
+    (finally
+      ;; Clear inflight once this attempt finishes (timer may now own the loop).
+      (state/update-resource! call-id dissoc :reconnect-inflight?))))
+
+(defn- on-signaling-disconnected!
+  [reason]
+  (when-let [call-id (state/active-call-id)]
+    (when-let [c (state/get-call call-id)]
+      (when (contains? #{:connecting :connected :reconnecting} (:state c))
+        (log/warn "signaling dropped during call reason=" reason " call-id=" call-id)
+        (if (= :reconnecting (:state c))
+          (begin-reconnect! call-id)
+          (when (state/set-call-state! call-id :reconnecting)
+            ;; Handler on :call-reconnecting starts the loop.
+            (event/emit-type! :call-reconnecting call-id
+                              {:reason :signaling-disconnected})))))))
+
+(defn- on-call-reconnecting!
+  [ev]
+  (when-let [call-id (:call-id ev)]
+    (begin-reconnect! call-id)))
 
 (defn- ^:async start-incoming-webrtc!
   [call-id]
@@ -85,13 +151,17 @@
     (if (err/error? prep)
       (do (fail-call! call-id (err/code prep) (err/message prep))
           prep)
-      (let [offer-sdp (:pending-offer (state/get-resource call-id))]
-        (when offer-sdp
-          (await (webrtc/set-remote-description! call-id "offer" offer-sdp)))
-        (let [answer (await (webrtc/create-answer! call-id))]
-          (signaling/webrtc-answer call-id (:sdp answer))
-          (life/start-connect-timeout! call-id #(on-connect-timeout! call-id))
-          {:ok true})))))
+      (try
+        (let [offer-sdp (:pending-offer (state/get-resource call-id))]
+          (when offer-sdp
+            (await (webrtc/set-remote-description! call-id "offer" offer-sdp)))
+          (let [answer (await (webrtc/create-answer! call-id))]
+            (signaling/webrtc-answer call-id (:sdp answer))
+            (life/start-connect-timeout! call-id #(on-connect-timeout! call-id))
+            {:ok true}))
+        (catch Exception e
+          (log/error "incoming webrtc negotiate failed: " e)
+          (fail-call! call-id :signaling-failed (str e)))))))
 
 (defn- handle-signaling-message! [msg]
   (let [type (msg-type msg)
@@ -221,6 +291,8 @@
   (signaling/set-transport! nil)
   (signaling/ensure-transport!)
   (signaling/on-message! handle-signaling-message!)
+  (signaling/on-disconnect! on-signaling-disconnected!)
+  (event/on :call-reconnecting ::reconnect on-call-reconnecting!)
   (when (or (:signaling-url opts) (:signaling opts))
     (await (signaling/connect!)))
   (state/set-initialized! true)

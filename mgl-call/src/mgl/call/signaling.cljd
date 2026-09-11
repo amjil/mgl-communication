@@ -12,12 +12,14 @@
   (:require
    ["dart:async" :as async]
    ["dart:convert" :as convert]
+   ["dart:core" :as dart :refer [Duration]]
    ["package:web_socket_channel/web_socket_channel.dart" :as ws]
    [mgl.call.config :as config]
    [mgl.call.log :as log]))
 
 (defonce ^:private !transport (atom nil))
 (defonce ^:private !handler (atom nil))
+(defonce ^:private !on-disconnect (atom nil))
 (defonce ^:private !conn
   (atom {:channel nil :subscription nil :status :disconnected :authenticated? false}))
 (defonce ^:private !auth-waiter (atom nil))
@@ -54,8 +56,9 @@
     (sequential? m) (mapv stringify-keys m)
     :else m))
 
-(defn- unwrap-data [msg]
+(defn- unwrap-data
   "Flatten envelope `data` into top-level keys for session handlers."
+  [msg]
   (let [data (:data msg)
         data (cond
                (map? data) data
@@ -114,17 +117,33 @@
     (catch Exception e
       (log/error "signaling decode failed: " e))))
 
+(defn on-disconnect!
+  "Register a handler invoked on unexpected signaling disconnect.
+   reason is a string; intentional closes (\"local\", \"reconnect\") do not fire."
+  [handler]
+  (reset! !on-disconnect handler)
+  nil)
+
 (defn- teardown-ws! [reason]
   (complete-auth! false)
-  (let [{:keys [subscription channel]} @!conn]
+  (let [{:keys [subscription channel]} @!conn
+        was-open? (contains? #{:open :connecting} (:status @!conn))]
     (when subscription
       (try (.cancel ^async/StreamSubscription subscription) (catch Exception _)))
     (when channel
       (try
         (.close (.-sink ^ws/WebSocketChannel channel))
-        (catch Exception _))))
-  (reset! !conn {:channel nil :subscription nil :status :disconnected :authenticated? false})
-  (log/info "signaling disconnected reason=" reason))
+        (catch Exception _)))
+    (reset! !conn {:channel nil :subscription nil :status :disconnected :authenticated? false})
+    (log/info "signaling disconnected reason=" reason)
+    ;; Notify only unexpected drops (not local hangup / intentional reconnect teardown).
+    (when (and was-open?
+               (not (contains? #{"local" "reconnect"} (str reason))))
+      (when-let [h @!on-disconnect]
+        (try
+          (h reason)
+          (catch Exception e
+            (log/error "on-disconnect handler failed: " e)))))))
 
 (defn- send-raw! [msg]
   (when (= :open (:status @!conn))
@@ -138,27 +157,27 @@
   (let [token (config/get* :access-token)
         device-id (config/get* :device-id)
         reconnect? (boolean @!ever-authed)]
-      (cond
-         (or (nil? token) (zero? (count token)))
-         (do (log/warn "no access-token; authenticate required")
-             false)
+    (cond
+      (or (nil? token) (zero? (count token)))
+      (do (log/warn "no access-token; authenticate required")
+          false)
 
-         :else
-         (let [waiter (async/Completer.)
-               _ (reset! !auth-waiter waiter)
-               sent? (send-raw!
-                      {:type "authenticate"
-                       :token token
-                       :device-id device-id
-                       :reconnect reconnect?})]
-           (if-not sent?
-             false
-             (try
-               (await (.timeout (.-future waiter) (Duration. .seconds 15)))
-               (catch Exception e
-                 (log/error "authenticate timeout/failed: " e)
-                 (complete-auth! false)
-                 false)))))))
+      :else
+      (let [waiter (async/Completer.)
+            _ (reset! !auth-waiter waiter)
+            sent? (send-raw!
+                   {:type "authenticate"
+                    :token token
+                    :device-id device-id
+                    :reconnect reconnect?})]
+        (if-not sent?
+          false
+          (try
+            (await (.timeout (.-future waiter) (Duration. .seconds 15)))
+            (catch Exception e
+              (log/error "authenticate timeout/failed: " e)
+              (complete-auth! false)
+              false)))))))
 
 (defn make-websocket
   "Build default WebSocket signaling transport.
