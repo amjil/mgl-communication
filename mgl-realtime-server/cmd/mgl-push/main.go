@@ -16,6 +16,7 @@ import (
 	"github.com/amjil/mgl-communication/mgl-realtime-server/internal/domain"
 	"github.com/amjil/mgl-communication/mgl-realtime-server/internal/events"
 	"github.com/amjil/mgl-communication/mgl-realtime-server/internal/incomingcall"
+	"github.com/amjil/mgl-communication/mgl-realtime-server/internal/oplog"
 	"github.com/amjil/mgl-communication/mgl-realtime-server/internal/phoenix"
 	"github.com/amjil/mgl-communication/mgl-realtime-server/internal/presence"
 	"github.com/amjil/mgl-communication/mgl-realtime-server/internal/provider"
@@ -101,17 +102,20 @@ func main() {
 	}
 	sfuSvc := sfu.NewService(sfuProvider, cfg.ICEServers)
 
-	// 2. 初始化 Presence 与 Call Store
+	// 2. 初始化 Presence、Call Store 以及 Oplog
 	var presenceStore presence.Store
 	var callStore call.Store
+	var oplogStore oplog.Store
 
 	if redisClient != nil {
 		presenceStore = presence.NewRedisStore(redisClient, bus, cfg.PresenceIdleAfter)
 		callStore = call.NewRedisStore(redisClient)
+		oplogStore = oplog.NewRedisStore(redisClient, 3*time.Minute) // 3 分钟瞬态信令窗口
 		logger.Info("runtime state store: redis (cluster mode enabled)")
 	} else {
 		presenceStore = presence.NewMemoryStore(bus)
 		callStore = call.NewMemoryStore()
+		oplogStore = oplog.NewNoOpStore() // 单机模式不缓存 Oplog
 		logger.Warn("runtime state store: memory (process-local only)")
 	}
 
@@ -141,6 +145,7 @@ func main() {
 		incomingSvc,
 		bus,
 		redisBus,
+		oplogStore,
 		logger,
 		wshub.HubConfig{
 			PingInterval:   cfg.WSPingInterval,

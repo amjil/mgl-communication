@@ -13,6 +13,7 @@ import (
 	"github.com/amjil/mgl-communication/mgl-realtime-server/internal/events"
 	"github.com/amjil/mgl-communication/mgl-realtime-server/internal/idgen"
 	"github.com/amjil/mgl-communication/mgl-realtime-server/internal/metrics"
+	"github.com/amjil/mgl-communication/mgl-realtime-server/internal/oplog"
 	"github.com/amjil/mgl-communication/mgl-realtime-server/internal/presence"
 	"github.com/amjil/mgl-communication/mgl-realtime-server/internal/ratelimit"
 	"github.com/amjil/mgl-communication/mgl-realtime-server/internal/signaling/connection"
@@ -59,6 +60,7 @@ type Hub struct {
 	incoming IncomingNotifier
 	bus      *events.Bus
 	redisBus *events.RedisBus
+	oplog    oplog.Store
 	logger   *slog.Logger
 
 	pingInterval time.Duration
@@ -87,6 +89,7 @@ func NewHub(
 	incoming IncomingNotifier,
 	bus *events.Bus,
 	redisBus *events.RedisBus,
+	oplogStore oplog.Store,
 	logger *slog.Logger,
 	cfg HubConfig,
 ) *Hub {
@@ -112,6 +115,7 @@ func NewHub(
 		incoming:     incoming,
 		bus:          bus,
 		redisBus:     redisBus,
+		oplog:        oplogStore,
 		logger:       logger,
 		pingInterval: cfg.PingInterval,
 		readTimeout:  cfg.ReadTimeout,
@@ -521,14 +525,33 @@ func (h *Hub) handleResume(c *connection.Conn, env protocol.Envelope) {
 		return
 	}
 	metrics.WebSocketReconnects.Inc()
-	snapshot, err := h.calls.ResumeFull(context.Background(), callID, c.UserID, c.DeviceID)
+
+	ctx := context.Background()
+	snapshot, err := h.calls.ResumeFull(ctx, callID, c.UserID, c.DeviceID)
 	if err != nil {
 		h.sendErr(c, callID, err)
 		return
 	}
+
+	// 1. 下发全量恢复快照
 	c.Send(protocol.New(protocol.TypeCallState, snapshot.CallID, c.UserID, snapshot))
 	if snapshot.Call != nil {
 		h.broadcastCall(snapshot.Call, protocol.TypeCallParticipantJoined, c.UserID)
+	}
+
+	// 2. Oplog 增量补偿 (Catch-up)：重放断网期间错过的 WebRTC 协商信令
+	if h.oplog != nil {
+		recentLogs, err := h.oplog.GetRecent(ctx, callID)
+		if err == nil {
+			for _, logEnv := range recentLogs {
+				// 过滤掉自己发出的信令，防止回音；客户端 EventDeduper 负责去重已处理包
+				if logEnv.SenderID != c.UserID {
+					c.Send(logEnv)
+				}
+			}
+		} else {
+			h.logger.Warn("failed to fetch oplog during resume", "call_id", callID, "error", err)
+		}
 	}
 }
 
@@ -592,7 +615,14 @@ func (h *Hub) relaySignaling(ctx context.Context, c *connection.Conn, env protoc
 		h.sendErr(c, env.CallID, errMsg("not a participant"))
 		return
 	}
+
 	out := protocol.New(env.Type, env.CallID, c.UserID, json.RawMessage(env.Data))
+
+	// 追加到 Oplog，供弱网重连时 catch-up
+	if h.oplog != nil {
+		_ = h.oplog.Append(ctx, env.CallID, out)
+	}
+
 	for _, p := range cl.Participants {
 		if p.UserID == c.UserID {
 			continue
