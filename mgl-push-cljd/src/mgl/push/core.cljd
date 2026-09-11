@@ -108,11 +108,14 @@
   ([client call-id]
    (.endSystemCall ^push/MglPush client call-id))
   ([call-id]
-   (end-system-call! (client!) call-id)))
+   (end-system-call! (client!) call-id))
+  ([]
+   (end-system-call! (client!) nil)))
 
 (defn end-system-call
   ([client call-id] (end-system-call! client call-id))
-  ([call-id] (end-system-call! call-id)))
+  ([call-id] (end-system-call! call-id))
+  ([] (end-system-call!)))
 
 (defn capabilities
   "Returns PushCapabilities (spec §17)."
@@ -134,7 +137,11 @@
           sub (.listen stream
                        (fn [event]
                          (doseq [h (vals @!handlers)]
-                           (try (h event) (catch Error _)))))]
+                           (try
+                             (h event)
+                             (catch Object e
+                               (dart:core/print
+                                (str "[mgl-push-cljd] Handler error: " e)))))))]
       (reset! !sub sub))))
 
 (defn on-event
