@@ -27,18 +27,18 @@ var upgrader = gorilla.Upgrader{
 }
 
 type CallAPI interface {
-	Create(call.CreateInput) (*call.Call, error)
-	Accept(callID, userID, deviceID string) (*call.Call, error)
-	Reject(callID, userID string) (*call.Call, error)
-	Cancel(callID, userID string) (*call.Call, error)
-	Join(callID, userID, deviceID string) (*call.Call, error)
-	Leave(callID, userID string) (*call.Call, error)
-	Hangup(callID, userID string) (*call.Call, error)
-	Resume(callID, userID, deviceID string) (*call.Call, error)
+	Create(ctx context.Context, in call.CreateInput) (*call.Call, error)
+	Accept(ctx context.Context, callID, userID, deviceID string) (*call.Call, error)
+	Reject(ctx context.Context, callID, userID string) (*call.Call, error)
+	Cancel(ctx context.Context, callID, userID string) (*call.Call, error)
+	Join(ctx context.Context, callID, userID, deviceID string) (*call.Call, error)
+	Leave(ctx context.Context, callID, userID string) (*call.Call, error)
+	Hangup(ctx context.Context, callID, userID string) (*call.Call, error)
+	Resume(ctx context.Context, callID, userID, deviceID string) (*call.Call, error)
 	ResumeFull(ctx context.Context, callID, userID, deviceID string) (*call.ResumeResult, error)
-	MarkConnected(callID, userID string) (*call.Call, error)
-	Get(callID string) (*call.Call, error)
-	ListActiveForUser(appID, userID string) []*call.Call
+	MarkConnected(ctx context.Context, callID, userID string) (*call.Call, error)
+	Get(ctx context.Context, callID string) (*call.Call, error)
+	ListActiveForUser(ctx context.Context, appID, userID string) []*call.Call
 }
 
 type IncomingNotifier interface {
@@ -394,7 +394,7 @@ func (h *Hub) handleAuth(c *connection.Conn, raw []byte) {
 
 	var active any
 	if h.calls != nil {
-		active = h.calls.ListActiveForUser(appID, claims.Subject)
+		active = h.calls.ListActiveForUser(context.Background(), appID, claims.Subject)
 	}
 	c.Send(protocol.New(protocol.TypeAuthenticated, "", claims.Subject, protocol.AuthenticatedData{
 		UserID:      claims.Subject,
@@ -406,40 +406,41 @@ func (h *Hub) handleAuth(c *connection.Conn, raw []byte) {
 }
 
 func (h *Hub) handleAuthed(c *connection.Conn, env protocol.Envelope) {
+	ctx := context.Background()
 	switch env.Type {
 	case protocol.TypeCallCreate:
 		h.handleCallCreate(c, env)
 	case protocol.TypeCallAccept:
 		h.handleAccept(c, env)
 	case protocol.TypeCallReject:
-		h.wrapCall(c, env, func(callID string) (*call.Call, error) {
-			return h.calls.Reject(callID, c.UserID)
+		h.wrapCall(ctx, c, env, func(ctx context.Context, callID string) (*call.Call, error) {
+			return h.calls.Reject(ctx, callID, c.UserID)
 		})
 	case protocol.TypeCallCancel:
-		h.wrapCall(c, env, func(callID string) (*call.Call, error) {
-			c2, err := h.calls.Cancel(callID, c.UserID)
+		h.wrapCall(ctx, c, env, func(ctx context.Context, callID string) (*call.Call, error) {
+			c2, err := h.calls.Cancel(ctx, callID, c.UserID)
 			if err == nil && h.incoming != nil {
 				h.incoming.NotifyCancelled(context.Background(), c2, "cancelled")
 			}
 			return c2, err
 		})
 	case protocol.TypeCallJoin:
-		h.wrapCall(c, env, func(callID string) (*call.Call, error) {
-			return h.calls.Join(callID, c.UserID, c.DeviceID)
+		h.wrapCall(ctx, c, env, func(ctx context.Context, callID string) (*call.Call, error) {
+			return h.calls.Join(ctx, callID, c.UserID, c.DeviceID)
 		})
 	case protocol.TypeCallLeave:
-		h.wrapCall(c, env, func(callID string) (*call.Call, error) {
-			return h.calls.Leave(callID, c.UserID)
+		h.wrapCall(ctx, c, env, func(ctx context.Context, callID string) (*call.Call, error) {
+			return h.calls.Leave(ctx, callID, c.UserID)
 		})
 	case protocol.TypeCallHangup:
-		h.wrapCall(c, env, func(callID string) (*call.Call, error) {
-			return h.calls.Hangup(callID, c.UserID)
+		h.wrapCall(ctx, c, env, func(ctx context.Context, callID string) (*call.Call, error) {
+			return h.calls.Hangup(ctx, callID, c.UserID)
 		})
 	case protocol.TypeCallResume, protocol.TypeSessionResume:
 		h.handleResume(c, env)
 	case protocol.TypeWebRTCOffer, protocol.TypeWebRTCAnswer, protocol.TypeWebRTCICECandidate,
 		protocol.TypeMediaMute, protocol.TypeMediaUnmute, protocol.TypeMediaCameraOn, protocol.TypeMediaCameraOff:
-		h.relaySignaling(c, env)
+		h.relaySignaling(ctx, c, env)
 	default:
 		c.Send(protocol.New(protocol.TypeError, env.CallID, c.UserID, protocol.ErrorData{
 			Code: "UNKNOWN_TYPE", Message: "unknown message type",
@@ -468,7 +469,7 @@ func (h *Hub) handleCallCreate(c *connection.Conn, env protocol.Envelope) {
 	if len(callees) == 0 && data.CalleeID != "" {
 		callees = []string{data.CalleeID}
 	}
-	created, err := h.calls.Create(call.CreateInput{
+	created, err := h.calls.Create(context.Background(), call.CreateInput{
 		AppID:        c.AppID,
 		CallerID:     c.UserID,
 		CallerDevice: c.DeviceID,
@@ -495,7 +496,7 @@ func (h *Hub) handleAccept(c *connection.Conn, env protocol.Envelope) {
 		h.sendErr(c, "", errMsg("call_id required"))
 		return
 	}
-	updated, err := h.calls.Accept(callID, c.UserID, c.DeviceID)
+	updated, err := h.calls.Accept(context.Background(), callID, c.UserID, c.DeviceID)
 	if err != nil {
 		h.sendErr(c, callID, err)
 		return
@@ -531,13 +532,13 @@ func (h *Hub) handleResume(c *connection.Conn, env protocol.Envelope) {
 	}
 }
 
-func (h *Hub) wrapCall(c *connection.Conn, env protocol.Envelope, fn func(string) (*call.Call, error)) {
+func (h *Hub) wrapCall(ctx context.Context, c *connection.Conn, env protocol.Envelope, fn func(context.Context, string) (*call.Call, error)) {
 	callID := h.callIDFrom(env)
 	if callID == "" {
 		h.sendErr(c, "", errMsg("call_id required"))
 		return
 	}
-	updated, err := fn(callID)
+	updated, err := fn(ctx, callID)
 	if err != nil {
 		h.sendErr(c, callID, err)
 		return
@@ -577,12 +578,12 @@ func mapCallEvent(clientType string) string {
 	}
 }
 
-func (h *Hub) relaySignaling(c *connection.Conn, env protocol.Envelope) {
+func (h *Hub) relaySignaling(ctx context.Context, c *connection.Conn, env protocol.Envelope) {
 	if env.CallID == "" || h.calls == nil {
 		h.sendErr(c, env.CallID, errMsg("call_id required"))
 		return
 	}
-	cl, err := h.calls.Get(env.CallID)
+	cl, err := h.calls.Get(ctx, env.CallID)
 	if err != nil {
 		h.sendErr(c, env.CallID, err)
 		return

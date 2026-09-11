@@ -1,6 +1,7 @@
 package call_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -9,10 +10,11 @@ import (
 )
 
 func TestDirectCallLifecycle(t *testing.T) {
+	ctx := context.Background()
 	bus := events.NewBus(16)
 	svc := call.NewService(call.NewStore(), bus, time.Minute)
 
-	c, err := svc.Create(call.CreateInput{
+	c, err := svc.Create(ctx, call.CreateInput{
 		AppID:     "app",
 		CallerID:  "user_a",
 		CalleeIDs: []string{"user_b"},
@@ -31,7 +33,7 @@ func TestDirectCallLifecycle(t *testing.T) {
 		t.Fatalf("mode=%s", c.Mode)
 	}
 
-	c, err = svc.Accept(c.ID, "user_b", "device_b")
+	c, err = svc.Accept(ctx, c.ID, "user_b", "device_b")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,11 +41,11 @@ func TestDirectCallLifecycle(t *testing.T) {
 		t.Fatalf("state=%s", c.State)
 	}
 
-	c, err = svc.Join(c.ID, "user_b", "device_b")
+	c, err = svc.Join(ctx, c.ID, "user_b", "device_b")
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err = svc.MarkConnected(c.ID, "user_b")
+	c, err = svc.MarkConnected(ctx, c.ID, "user_b")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +53,7 @@ func TestDirectCallLifecycle(t *testing.T) {
 		t.Fatalf("state=%s", c.State)
 	}
 
-	c, err = svc.Hangup(c.ID, "user_a")
+	c, err = svc.Hangup(ctx, c.ID, "user_a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,8 +63,9 @@ func TestDirectCallLifecycle(t *testing.T) {
 }
 
 func TestGroupCallUsesSFU(t *testing.T) {
+	ctx := context.Background()
 	svc := call.NewService(call.NewStore(), nil, time.Minute)
-	c, err := svc.Create(call.CreateInput{
+	c, err := svc.Create(ctx, call.CreateInput{
 		AppID:     "app",
 		CallerID:  "user_a",
 		CalleeIDs: []string{"user_b", "user_c"},
@@ -78,14 +81,15 @@ func TestGroupCallUsesSFU(t *testing.T) {
 }
 
 func TestRejectEndsDirectCall(t *testing.T) {
+	ctx := context.Background()
 	svc := call.NewService(call.NewStore(), nil, time.Minute)
-	c, err := svc.Create(call.CreateInput{
+	c, err := svc.Create(ctx, call.CreateInput{
 		AppID: "app", CallerID: "a", CalleeIDs: []string{"b"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err = svc.Reject(c.ID, "b")
+	c, err = svc.Reject(ctx, c.ID, "b")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,14 +99,15 @@ func TestRejectEndsDirectCall(t *testing.T) {
 }
 
 func TestMultiDeviceAcceptMarksDevice(t *testing.T) {
+	ctx := context.Background()
 	svc := call.NewService(call.NewStore(), nil, time.Minute)
-	c, err := svc.Create(call.CreateInput{
+	c, err := svc.Create(ctx, call.CreateInput{
 		AppID: "app", CallerID: "a", CalleeIDs: []string{"b"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err = svc.Accept(c.ID, "b", "iphone")
+	c, err = svc.Accept(ctx, c.ID, "b", "iphone")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,16 +118,17 @@ func TestMultiDeviceAcceptMarksDevice(t *testing.T) {
 }
 
 func TestResumeMarksReconnecting(t *testing.T) {
+	ctx := context.Background()
 	svc := call.NewService(call.NewStore(), nil, time.Minute)
-	c, err := svc.Create(call.CreateInput{
+	c, err := svc.Create(ctx, call.CreateInput{
 		AppID: "app", CallerID: "a", CalleeIDs: []string{"b"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = svc.Accept(c.ID, "b", "d1")
-	_, _ = svc.MarkConnected(c.ID, "b")
-	c, err = svc.Resume(c.ID, "b", "d1")
+	_, _ = svc.Accept(ctx, c.ID, "b", "d1")
+	_, _ = svc.MarkConnected(ctx, c.ID, "b")
+	c, err = svc.Resume(ctx, c.ID, "b", "d1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,19 +139,20 @@ func TestResumeMarksReconnecting(t *testing.T) {
 }
 
 func TestListActiveForUser(t *testing.T) {
+	ctx := context.Background()
 	svc := call.NewService(call.NewStore(), nil, time.Minute)
-	c, err := svc.Create(call.CreateInput{
+	c, err := svc.Create(ctx, call.CreateInput{
 		AppID: "app", CallerID: "a", CalleeIDs: []string{"b"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	active := svc.ListActiveForUser("app", "b")
+	active := svc.ListActiveForUser(ctx, "app", "b")
 	if len(active) != 1 || active[0].ID != c.ID {
 		t.Fatalf("active=%v", active)
 	}
-	_, _ = svc.Hangup(c.ID, "a")
-	if len(svc.ListActiveForUser("app", "b")) != 0 {
+	_, _ = svc.Hangup(ctx, c.ID, "a")
+	if len(svc.ListActiveForUser(ctx, "app", "b")) != 0 {
 		t.Fatal("expected no active calls")
 	}
 }

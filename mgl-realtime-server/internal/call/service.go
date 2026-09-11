@@ -1,62 +1,13 @@
 package call
 
 import (
-	"sync"
+	"context"
 	"time"
 
 	"github.com/amjil/mgl-communication/mgl-realtime-server/internal/domain"
 	"github.com/amjil/mgl-communication/mgl-realtime-server/internal/events"
 	"github.com/amjil/mgl-communication/mgl-realtime-server/internal/idgen"
 )
-
-type Store struct {
-	mu    sync.RWMutex
-	calls map[string]*Call
-	byUser map[string]map[string]struct{} // app|user -> callIDs
-}
-
-func NewStore() *Store {
-	return &Store{
-		calls:  make(map[string]*Call),
-		byUser: make(map[string]map[string]struct{}),
-	}
-}
-
-func (s *Store) Put(c *Call) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.calls[c.ID] = c
-	for _, p := range c.Participants {
-		uk := c.AppID + "|" + p.UserID
-		if s.byUser[uk] == nil {
-			s.byUser[uk] = make(map[string]struct{})
-		}
-		s.byUser[uk][c.ID] = struct{}{}
-	}
-}
-
-func (s *Store) Get(callID string) (*Call, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	c, ok := s.calls[callID]
-	if !ok {
-		return nil, false
-	}
-	return c.Clone(), true
-}
-
-func (s *Store) Update(callID string, fn func(*Call) error) (*Call, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	c, ok := s.calls[callID]
-	if !ok {
-		return nil, domain.CallNotFound()
-	}
-	if err := fn(c); err != nil {
-		return nil, err
-	}
-	return c.Clone(), nil
-}
 
 type CreateInput struct {
 	AppID        string
@@ -69,13 +20,13 @@ type CreateInput struct {
 }
 
 type Service struct {
-	store       *Store
-	bus         *events.Bus
-	ringTimeout time.Duration
+	store         Store
+	bus           *events.Bus
+	ringTimeout   time.Duration
 	onRingTimeout func(callID string)
 }
 
-func NewService(store *Store, bus *events.Bus, ringTimeout time.Duration) *Service {
+func NewService(store Store, bus *events.Bus, ringTimeout time.Duration) *Service {
 	if ringTimeout <= 0 {
 		ringTimeout = 45 * time.Second
 	}
@@ -86,7 +37,7 @@ func (s *Service) SetRingTimeoutHandler(fn func(callID string)) {
 	s.onRingTimeout = fn
 }
 
-func (s *Service) Create(in CreateInput) (*Call, error) {
+func (s *Service) Create(ctx context.Context, in CreateInput) (*Call, error) {
 	if in.CallerID == "" || len(in.CalleeIDs) == 0 {
 		return nil, domain.InvalidRequest("caller_id and callees are required")
 	}
@@ -111,7 +62,6 @@ func (s *Service) Create(in CreateInput) (*Call, error) {
 	if mode == ModeDirect && len(in.CalleeIDs) != 1 {
 		return nil, domain.InvalidRequest("direct call requires exactly one callee")
 	}
-
 	transport := TransportP2P
 	if mode == ModeGroup {
 		transport = TransportSFU
@@ -155,7 +105,10 @@ func (s *Service) Create(in CreateInput) (*Call, error) {
 		CreatedAt:    now,
 		Participants: participants,
 	}
-	s.store.Put(c)
+
+	if err := s.store.Put(ctx, c); err != nil {
+		return nil, err
+	}
 
 	s.publish(events.CallCreated, c, in.CallerID, nil)
 	s.publish(events.CallRinging, c, in.CallerID, nil)
@@ -169,7 +122,10 @@ func (s *Service) scheduleTimeout(callID string) {
 	timer := time.NewTimer(s.ringTimeout)
 	defer timer.Stop()
 	<-timer.C
-	_, err := s.store.Update(callID, func(c *Call) error {
+
+	// 注意：后台定时器任务必须使用 context.Background()，不能复用请求 ctx
+	ctx := context.Background()
+	_, err := s.store.Update(ctx, callID, func(c *Call) error {
 		if c.State != StateRinging {
 			return errSkip
 		}
@@ -185,10 +141,12 @@ func (s *Service) scheduleTimeout(callID string) {
 		}
 		return nil
 	})
+	// errSkip：通话已离开 ringing，无需发 timeout 事件；其它错误同样中止
 	if err != nil {
 		return
 	}
-	if c, ok := s.store.Get(callID); ok {
+
+	if c, err := s.store.Get(ctx, callID); err == nil {
 		s.publish(events.CallEnded, c, "", map[string]any{"reason": "ring_timeout"})
 	}
 	if s.onRingTimeout != nil {
@@ -198,16 +156,12 @@ func (s *Service) scheduleTimeout(callID string) {
 
 var errSkip = domain.InvalidRequest("skip")
 
-func (s *Service) Get(callID string) (*Call, error) {
-	c, ok := s.store.Get(callID)
-	if !ok {
-		return nil, domain.CallNotFound()
-	}
-	return c, nil
+func (s *Service) Get(ctx context.Context, callID string) (*Call, error) {
+	return s.store.Get(ctx, callID)
 }
 
-func (s *Service) Accept(callID, userID, deviceID string) (*Call, error) {
-	c, err := s.store.Update(callID, func(c *Call) error {
+func (s *Service) Accept(ctx context.Context, callID, userID, deviceID string) (*Call, error) {
+	c, err := s.store.Update(ctx, callID, func(c *Call) error {
 		if c.IsTerminal() {
 			return domain.InvalidRequest("call already ended")
 		}
@@ -218,12 +172,13 @@ func (s *Service) Accept(callID, userID, deviceID string) (*Call, error) {
 		if p == nil {
 			return domain.Forbidden("not a participant")
 		}
+
 		now := time.Now().UTC()
 		p.State = ParticipantAccepted
 		p.DeviceID = deviceID
 		p.JoinedAt = &now
 		c.State = StateAccepted
-		// Direct: disconnect other callees still ringing.
+
 		if c.Mode == ModeDirect {
 			for _, other := range c.Participants {
 				if other.UserID != userID && other.UserID != c.CallerID &&
@@ -235,6 +190,7 @@ func (s *Service) Accept(callID, userID, deviceID string) (*Call, error) {
 		}
 		return nil
 	})
+
 	if err != nil {
 		return nil, err
 	}
@@ -245,8 +201,8 @@ func (s *Service) Accept(callID, userID, deviceID string) (*Call, error) {
 	return c, nil
 }
 
-func (s *Service) Reject(callID, userID string) (*Call, error) {
-	c, err := s.store.Update(callID, func(c *Call) error {
+func (s *Service) Reject(ctx context.Context, callID, userID string) (*Call, error) {
+	c, err := s.store.Update(ctx, callID, func(c *Call) error {
 		if c.IsTerminal() {
 			return domain.InvalidRequest("call already ended")
 		}
@@ -254,9 +210,11 @@ func (s *Service) Reject(callID, userID string) (*Call, error) {
 		if p == nil {
 			return domain.Forbidden("not a participant")
 		}
+
 		now := time.Now().UTC()
 		p.State = ParticipantRejected
 		p.LeftAt = &now
+
 		if c.Mode == ModeDirect {
 			c.State = StateRejected
 			c.EndedAt = &now
@@ -264,6 +222,7 @@ func (s *Service) Reject(callID, userID string) (*Call, error) {
 		}
 		return nil
 	})
+
 	if err != nil {
 		return nil, err
 	}
@@ -274,18 +233,20 @@ func (s *Service) Reject(callID, userID string) (*Call, error) {
 	return c, nil
 }
 
-func (s *Service) Cancel(callID, userID string) (*Call, error) {
-	c, err := s.store.Update(callID, func(c *Call) error {
+func (s *Service) Cancel(ctx context.Context, callID, userID string) (*Call, error) {
+	c, err := s.store.Update(ctx, callID, func(c *Call) error {
 		if c.IsTerminal() {
 			return domain.InvalidRequest("call already ended")
 		}
 		if c.CallerID != userID {
 			return domain.Forbidden("only caller can cancel")
 		}
+
 		now := time.Now().UTC()
 		c.State = StateCancelled
 		c.EndedAt = &now
 		c.Reason = "cancelled"
+
 		for _, p := range c.Participants {
 			if p.State == ParticipantRinging || p.State == ParticipantInvited {
 				p.State = ParticipantDisconnected
@@ -294,6 +255,7 @@ func (s *Service) Cancel(callID, userID string) (*Call, error) {
 		}
 		return nil
 	})
+
 	if err != nil {
 		return nil, err
 	}
@@ -302,13 +264,14 @@ func (s *Service) Cancel(callID, userID string) (*Call, error) {
 	return c, nil
 }
 
-func (s *Service) Join(callID, userID, deviceID string) (*Call, error) {
-	c, err := s.store.Update(callID, func(c *Call) error {
+func (s *Service) Join(ctx context.Context, callID, userID, deviceID string) (*Call, error) {
+	c, err := s.store.Update(ctx, callID, func(c *Call) error {
 		if c.IsTerminal() {
 			return domain.InvalidRequest("call already ended")
 		}
 		p := c.FindParticipant(userID)
 		now := time.Now().UTC()
+
 		if p == nil {
 			if c.Mode != ModeGroup {
 				return domain.Forbidden("not a participant")
@@ -321,11 +284,13 @@ func (s *Service) Join(callID, userID, deviceID string) (*Call, error) {
 		if p.JoinedAt == nil {
 			p.JoinedAt = &now
 		}
+
 		if c.State == StateAccepted || c.State == StateRinging {
 			c.State = StateConnecting
 		}
 		return nil
 	})
+
 	if err != nil {
 		return nil, err
 	}
@@ -333,8 +298,8 @@ func (s *Service) Join(callID, userID, deviceID string) (*Call, error) {
 	return c, nil
 }
 
-func (s *Service) MarkConnected(callID, userID string) (*Call, error) {
-	c, err := s.store.Update(callID, func(c *Call) error {
+func (s *Service) MarkConnected(ctx context.Context, callID, userID string) (*Call, error) {
+	c, err := s.store.Update(ctx, callID, func(c *Call) error {
 		if c.IsTerminal() {
 			return domain.InvalidRequest("call already ended")
 		}
@@ -342,14 +307,16 @@ func (s *Service) MarkConnected(callID, userID string) (*Call, error) {
 		if p == nil {
 			return domain.Forbidden("not a participant")
 		}
+
 		now := time.Now().UTC()
 		p.State = ParticipantConnected
 		if c.StartedAt == nil {
 			c.StartedAt = &now
+			c.State = StateConnected
 		}
-		c.State = StateConnected
 		return nil
 	})
+
 	if err != nil {
 		return nil, err
 	}
@@ -357,16 +324,16 @@ func (s *Service) MarkConnected(callID, userID string) (*Call, error) {
 	return c, nil
 }
 
-func (s *Service) Leave(callID, userID string) (*Call, error) {
-	return s.endForUser(callID, userID, "left", false)
+func (s *Service) Leave(ctx context.Context, callID, userID string) (*Call, error) {
+	return s.endForUser(ctx, callID, userID, "left", false)
 }
 
-func (s *Service) Hangup(callID, userID string) (*Call, error) {
-	return s.endForUser(callID, userID, "hangup", true)
+func (s *Service) Hangup(ctx context.Context, callID, userID string) (*Call, error) {
+	return s.endForUser(ctx, callID, userID, "hangup", true)
 }
 
-func (s *Service) Fail(callID, reason string) (*Call, error) {
-	c, err := s.store.Update(callID, func(c *Call) error {
+func (s *Service) Fail(ctx context.Context, callID, reason string) (*Call, error) {
+	c, err := s.store.Update(ctx, callID, func(c *Call) error {
 		if c.IsTerminal() {
 			return nil
 		}
@@ -376,6 +343,7 @@ func (s *Service) Fail(callID, reason string) (*Call, error) {
 		c.Reason = reason
 		return nil
 	})
+
 	if err != nil {
 		return nil, err
 	}
@@ -383,8 +351,8 @@ func (s *Service) Fail(callID, reason string) (*Call, error) {
 	return c, nil
 }
 
-func (s *Service) Resume(callID, userID, deviceID string) (*Call, error) {
-	c, err := s.Get(callID)
+func (s *Service) Resume(ctx context.Context, callID, userID, deviceID string) (*Call, error) {
+	c, err := s.Get(ctx, callID)
 	if err != nil {
 		return nil, err
 	}
@@ -392,36 +360,37 @@ func (s *Service) Resume(callID, userID, deviceID string) (*Call, error) {
 	if p == nil {
 		return nil, domain.Forbidden("not a participant")
 	}
+
 	if c.IsTerminal() {
 		return c, nil
 	}
-	_, _ = s.store.Update(callID, func(c *Call) error {
+
+	_, _ = s.store.Update(ctx, callID, func(c *Call) error {
 		p := c.FindParticipant(userID)
 		if p != nil {
 			p.DeviceID = deviceID
-			if p.State == ParticipantDisconnected || p.State == ParticipantReconnecting ||
-				p.State == ParticipantConnected {
+			if p.State == ParticipantDisconnected || p.State == ParticipantReconnecting || p.State == ParticipantConnected {
 				p.State = ParticipantReconnecting
 			}
 		}
 		return nil
 	})
-	return s.Get(callID)
+	return s.Get(ctx, callID)
 }
 
-func (s *Service) ListActiveForUser(appID, userID string) []*Call {
-	ids := s.store.ActiveCallIDsForUser(appID, userID)
+func (s *Service) ListActiveForUser(ctx context.Context, appID, userID string) []*Call {
+	ids := s.store.ActiveCallIDsForUser(ctx, appID, userID)
 	out := make([]*Call, 0, len(ids))
 	for _, id := range ids {
-		if c, ok := s.store.Get(id); ok {
+		if c, err := s.Get(ctx, id); err == nil && c != nil && !c.IsTerminal() {
 			out = append(out, c)
 		}
 	}
 	return out
 }
 
-func (s *Service) endForUser(callID, userID, reason string, endCall bool) (*Call, error) {
-	c, err := s.store.Update(callID, func(c *Call) error {
+func (s *Service) endForUser(ctx context.Context, callID, userID, reason string, endCall bool) (*Call, error) {
+	c, err := s.store.Update(ctx, callID, func(c *Call) error {
 		if c.IsTerminal() {
 			return domain.InvalidRequest("call already ended")
 		}
@@ -429,6 +398,7 @@ func (s *Service) endForUser(callID, userID, reason string, endCall bool) (*Call
 		if p == nil {
 			return domain.Forbidden("not a participant")
 		}
+
 		now := time.Now().UTC()
 		p.State = ParticipantLeft
 		p.LeftAt = &now
@@ -439,7 +409,7 @@ func (s *Service) endForUser(callID, userID, reason string, endCall bool) (*Call
 			c.Reason = reason
 			return nil
 		}
-		// Group: end when fewer than 1 connected/connecting remains besides left.
+
 		active := 0
 		for _, other := range c.Participants {
 			switch other.State {
@@ -454,6 +424,7 @@ func (s *Service) endForUser(callID, userID, reason string, endCall bool) (*Call
 		}
 		return nil
 	})
+
 	if err != nil {
 		return nil, err
 	}
@@ -475,23 +446,10 @@ func (s *Service) publish(typ string, c *Call, sender string, extra map[string]a
 		payload[k] = v
 	}
 	s.bus.Publish(events.Event{
-		Type:     typ,
-		AppID:    c.AppID,
-		UserID:   sender,
-		CallID:   c.ID,
-		Payload:  payload,
+		Type:    typ,
+		AppID:   c.AppID,
+		UserID:  sender,
+		CallID:  c.ID,
+		Payload: payload,
 	})
-}
-
-func (s *Store) ActiveCallIDsForUser(appID, userID string) []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	ids := s.byUser[appID+"|"+userID]
-	out := make([]string, 0, len(ids))
-	for id := range ids {
-		if c, ok := s.calls[id]; ok && !c.IsTerminal() {
-			out = append(out, id)
-		}
-	}
-	return out
 }

@@ -101,7 +101,13 @@ func main() {
 	}
 	sfuSvc := sfu.NewService(sfuProvider, cfg.ICEServers)
 
-	callStore := call.NewStore()
+	var callStore call.Store = call.NewMemoryStore()
+	if redisClient != nil {
+		callStore = call.NewRedisStore(redisClient)
+		logger.Info("call runtime store: redis")
+	} else {
+		logger.Warn("call runtime store: memory (process-local; set MGL_PUSH_REDIS_URL for cluster)")
+	}
 	callRuntime := call.NewService(callStore, bus, cfg.CallRingTimeout)
 	orchestrator := &call.Orchestrator{
 		Runtime:    callRuntime,
@@ -114,7 +120,7 @@ func main() {
 
 	incomingSvc := incomingcall.New(messageSvc, bus, logger)
 	callRuntime.SetRingTimeoutHandler(func(callID string) {
-		c, err := callRuntime.Get(callID)
+		c, err := callRuntime.Get(context.Background(), callID)
 		if err != nil {
 			return
 		}

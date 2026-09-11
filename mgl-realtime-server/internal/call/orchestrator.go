@@ -12,13 +12,12 @@ import (
 	"github.com/amjil/mgl-communication/mgl-realtime-server/internal/sfu"
 )
 
-// Orchestrator adds Phoenix authorization, SFU tokens, and ICE config on top of runtime.
 type Orchestrator struct {
-	Runtime   *Service
-	Authz     phoenix.Authorizer
-	SFU       *sfu.Service
-	JWT       *auth.JWTValidator
-	TokenTTL  time.Duration
+	Runtime    *Service
+	Authz      phoenix.Authorizer
+	SFU        *sfu.Service
+	JWT        *auth.JWTValidator
+	TokenTTL   time.Duration
 	ICEServers []config.ICEServer
 }
 
@@ -33,7 +32,6 @@ type TokenResult struct {
 	ExpiresIn  int                `json:"expires_in"`
 }
 
-// ResumeResult is the call recovery payload (spec §26).
 type ResumeResult struct {
 	CallID       string             `json:"call_id"`
 	State        string             `json:"state"`
@@ -44,23 +42,21 @@ type ResumeResult struct {
 	ICEServers   []config.ICEServer `json:"ice_servers,omitempty"`
 }
 
-func (o *Orchestrator) Create(in CreateInput) (*Call, error) {
-	return o.CreateCtx(context.Background(), in)
-}
-
-func (o *Orchestrator) CreateCtx(ctx context.Context, in CreateInput) (*Call, error) {
+func (o *Orchestrator) Create(ctx context.Context, in CreateInput) (*Call, error) {
 	if o.Authz != nil {
 		if err := o.Authz.CanUserCall(ctx, in.AppID, in.CallerID, in.CalleeIDs); err != nil {
 			return nil, domain.Forbidden(fmt.Sprintf("not allowed: %v", err))
 		}
 	}
-	c, err := o.Runtime.Create(in)
+
+	c, err := o.Runtime.Create(ctx, in)
 	if err != nil {
 		return nil, err
 	}
+
 	if c.Transport == TransportSFU && o.SFU != nil {
 		if err := o.SFU.EnsureRoom(ctx, c.RoomID); err != nil {
-			_, _ = o.Runtime.Fail(c.ID, "sfu_room_failed")
+			_, _ = o.Runtime.Fail(ctx, c.ID, "sfu_room_failed")
 			return nil, domain.Internal("sfu room create failed")
 		}
 	}
@@ -68,7 +64,7 @@ func (o *Orchestrator) CreateCtx(ctx context.Context, in CreateInput) (*Call, er
 }
 
 func (o *Orchestrator) IssueToken(ctx context.Context, callID, userID string) (*TokenResult, error) {
-	c, err := o.Runtime.Get(callID)
+	c, err := o.Runtime.Get(ctx, callID)
 	if err != nil {
 		return nil, err
 	}
@@ -76,14 +72,17 @@ func (o *Orchestrator) IssueToken(ctx context.Context, callID, userID string) (*
 	if p == nil {
 		return nil, domain.Forbidden("not a participant")
 	}
+
 	role := "publisher"
 	if p.Role != "" {
 		role = p.Role
 	}
+
 	ttl := o.TokenTTL
 	if ttl <= 0 {
 		ttl = 5 * time.Minute
 	}
+
 	result := &TokenResult{
 		CallID:    c.ID,
 		RoomID:    c.RoomID,
@@ -91,6 +90,7 @@ func (o *Orchestrator) IssueToken(ctx context.Context, callID, userID string) (*
 		Role:      role,
 		ExpiresIn: int(ttl.Seconds()),
 	}
+
 	if c.Transport == TransportSFU {
 		info, err := o.SFU.Join(ctx, c.RoomID, userID, role, ttl)
 		if err != nil {
@@ -109,34 +109,40 @@ func (o *Orchestrator) IssueToken(ctx context.Context, callID, userID string) (*
 	return result, nil
 }
 
-// Delegate runtime methods used by Hub / HTTP.
-func (o *Orchestrator) Accept(callID, userID, deviceID string) (*Call, error) {
-	return o.Runtime.Accept(callID, userID, deviceID)
+func (o *Orchestrator) Accept(ctx context.Context, callID, userID, deviceID string) (*Call, error) {
+	return o.Runtime.Accept(ctx, callID, userID, deviceID)
 }
-func (o *Orchestrator) Reject(callID, userID string) (*Call, error) {
-	return o.Runtime.Reject(callID, userID)
+
+func (o *Orchestrator) Reject(ctx context.Context, callID, userID string) (*Call, error) {
+	return o.Runtime.Reject(ctx, callID, userID)
 }
-func (o *Orchestrator) Cancel(callID, userID string) (*Call, error) {
-	return o.Runtime.Cancel(callID, userID)
+
+func (o *Orchestrator) Cancel(ctx context.Context, callID, userID string) (*Call, error) {
+	return o.Runtime.Cancel(ctx, callID, userID)
 }
-func (o *Orchestrator) Join(callID, userID, deviceID string) (*Call, error) {
-	return o.Runtime.Join(callID, userID, deviceID)
+
+func (o *Orchestrator) Join(ctx context.Context, callID, userID, deviceID string) (*Call, error) {
+	return o.Runtime.Join(ctx, callID, userID, deviceID)
 }
-func (o *Orchestrator) Leave(callID, userID string) (*Call, error) {
-	return o.Runtime.Leave(callID, userID)
+
+func (o *Orchestrator) Leave(ctx context.Context, callID, userID string) (*Call, error) {
+	return o.Runtime.Leave(ctx, callID, userID)
 }
-func (o *Orchestrator) Hangup(callID, userID string) (*Call, error) {
-	return o.Runtime.Hangup(callID, userID)
+
+func (o *Orchestrator) Hangup(ctx context.Context, callID, userID string) (*Call, error) {
+	return o.Runtime.Hangup(ctx, callID, userID)
 }
-func (o *Orchestrator) Resume(callID, userID, deviceID string) (*Call, error) {
-	return o.Runtime.Resume(callID, userID, deviceID)
+
+func (o *Orchestrator) Resume(ctx context.Context, callID, userID, deviceID string) (*Call, error) {
+	return o.Runtime.Resume(ctx, callID, userID, deviceID)
 }
 
 func (o *Orchestrator) ResumeFull(ctx context.Context, callID, userID, deviceID string) (*ResumeResult, error) {
-	c, err := o.Runtime.Resume(callID, userID, deviceID)
+	c, err := o.Runtime.Resume(ctx, callID, userID, deviceID)
 	if err != nil {
 		return nil, err
 	}
+
 	result := &ResumeResult{
 		CallID:       c.ID,
 		State:        c.State,
@@ -148,6 +154,7 @@ func (o *Orchestrator) ResumeFull(ctx context.Context, callID, userID, deviceID 
 		},
 		ICEServers: o.ICEServers,
 	}
+
 	if !c.IsTerminal() {
 		tok, err := o.IssueToken(ctx, callID, userID)
 		if err == nil {
@@ -163,13 +170,14 @@ func (o *Orchestrator) ResumeFull(ctx context.Context, callID, userID, deviceID 
 	return result, nil
 }
 
-func (o *Orchestrator) ListActiveForUser(appID, userID string) []*Call {
-	return o.Runtime.ListActiveForUser(appID, userID)
+func (o *Orchestrator) ListActiveForUser(ctx context.Context, appID, userID string) []*Call {
+	return o.Runtime.ListActiveForUser(ctx, appID, userID)
 }
 
-func (o *Orchestrator) MarkConnected(callID, userID string) (*Call, error) {
-	return o.Runtime.MarkConnected(callID, userID)
+func (o *Orchestrator) MarkConnected(ctx context.Context, callID, userID string) (*Call, error) {
+	return o.Runtime.MarkConnected(ctx, callID, userID)
 }
-func (o *Orchestrator) Get(callID string) (*Call, error) {
-	return o.Runtime.Get(callID)
+
+func (o *Orchestrator) Get(ctx context.Context, callID string) (*Call, error) {
+	return o.Runtime.Get(ctx, callID)
 }

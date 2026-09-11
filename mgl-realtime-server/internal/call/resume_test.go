@@ -13,6 +13,7 @@ import (
 )
 
 func TestResumeFullIncludesRoomAndToken(t *testing.T) {
+	ctx := context.Background()
 	jwt := auth.NewJWTValidator("secret", "test")
 	orch := &call.Orchestrator{
 		Runtime:    call.NewService(call.NewStore(), nil, time.Minute),
@@ -22,14 +23,14 @@ func TestResumeFullIncludesRoomAndToken(t *testing.T) {
 		TokenTTL:   time.Minute,
 		ICEServers: []config.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}},
 	}
-	c, err := orch.Create(call.CreateInput{
+	c, err := orch.Create(ctx, call.CreateInput{
 		AppID: "nomio", CallerID: "a", CalleeIDs: []string{"b"}, Type: call.TypeAudio,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = orch.Accept(c.ID, "b", "d1")
-	snap, err := orch.ResumeFull(context.Background(), c.ID, "b", "d1")
+	_, _ = orch.Accept(ctx, c.ID, "b", "d1")
+	snap, err := orch.ResumeFull(ctx, c.ID, "b", "d1")
 	if err != nil {
 		t.Fatal(err)
 	}

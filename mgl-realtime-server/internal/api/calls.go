@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/amjil/mgl-communication/mgl-realtime-server/internal/auth"
@@ -52,7 +53,7 @@ func (s *Server) handleCreateCall(w http.ResponseWriter, r *http.Request) {
 	if len(callees) == 0 && req.CalleeID != "" {
 		callees = []string{req.CalleeID}
 	}
-	created, err := s.calls.CreateCtx(r.Context(), call.CreateInput{
+	created, err := s.calls.Create(r.Context(), call.CreateInput{
 		AppID:        appID,
 		CallerID:     callerID,
 		CallerDevice: deviceID,
@@ -67,7 +68,7 @@ func (s *Server) handleCreateCall(w http.ResponseWriter, r *http.Request) {
 	}
 	metrics.CallsCreatedTotal.WithLabelValues(appID).Inc()
 	if s.incoming != nil {
-		go s.incoming.NotifyRinging(r.Context(), created, req.CallerName)
+		go s.incoming.NotifyRinging(context.Background(), created, req.CallerName)
 	}
 	writeJSON(w, http.StatusCreated, created)
 }
@@ -77,7 +78,7 @@ func (s *Server) handleGetCall(w http.ResponseWriter, r *http.Request) {
 		writeError(w, domain.Internal("call service unavailable"))
 		return
 	}
-	c, err := s.calls.Get(r.PathValue("id"))
+	c, err := s.calls.Get(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -110,49 +111,49 @@ func (s *Server) handleResumeCall(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAcceptCall(w http.ResponseWriter, r *http.Request) {
-	s.withActor(w, r, func(callID, userID, deviceID string) (*call.Call, error) {
-		c, err := s.calls.Accept(callID, userID, deviceID)
+	s.withActor(w, r, func(ctx context.Context, callID, userID, deviceID string) (*call.Call, error) {
+		c, err := s.calls.Accept(ctx, callID, userID, deviceID)
 		if err != nil {
 			return nil, err
 		}
 		if s.incoming != nil {
-			go s.incoming.NotifyStopRinging(r.Context(), c, userID, "accepted_elsewhere")
+			go s.incoming.NotifyStopRinging(context.Background(), c, userID, "accepted_elsewhere")
 		}
 		return c, nil
 	})
 }
 
 func (s *Server) handleRejectCall(w http.ResponseWriter, r *http.Request) {
-	s.withActor(w, r, func(callID, userID, _ string) (*call.Call, error) {
-		return s.calls.Reject(callID, userID)
+	s.withActor(w, r, func(ctx context.Context, callID, userID, _ string) (*call.Call, error) {
+		return s.calls.Reject(ctx, callID, userID)
 	})
 }
 
 func (s *Server) handleCancelCall(w http.ResponseWriter, r *http.Request) {
-	s.withActor(w, r, func(callID, userID, _ string) (*call.Call, error) {
-		c, err := s.calls.Cancel(callID, userID)
+	s.withActor(w, r, func(ctx context.Context, callID, userID, _ string) (*call.Call, error) {
+		c, err := s.calls.Cancel(ctx, callID, userID)
 		if err == nil && s.incoming != nil {
-			go s.incoming.NotifyCancelled(r.Context(), c, "cancelled")
+			go s.incoming.NotifyCancelled(context.Background(), c, "cancelled")
 		}
 		return c, err
 	})
 }
 
 func (s *Server) handleJoinCall(w http.ResponseWriter, r *http.Request) {
-	s.withActor(w, r, func(callID, userID, deviceID string) (*call.Call, error) {
-		return s.calls.Join(callID, userID, deviceID)
+	s.withActor(w, r, func(ctx context.Context, callID, userID, deviceID string) (*call.Call, error) {
+		return s.calls.Join(ctx, callID, userID, deviceID)
 	})
 }
 
 func (s *Server) handleLeaveCall(w http.ResponseWriter, r *http.Request) {
-	s.withActor(w, r, func(callID, userID, _ string) (*call.Call, error) {
-		return s.calls.Leave(callID, userID)
+	s.withActor(w, r, func(ctx context.Context, callID, userID, _ string) (*call.Call, error) {
+		return s.calls.Leave(ctx, callID, userID)
 	})
 }
 
 func (s *Server) handleHangupCall(w http.ResponseWriter, r *http.Request) {
-	s.withActor(w, r, func(callID, userID, _ string) (*call.Call, error) {
-		return s.calls.Hangup(callID, userID)
+	s.withActor(w, r, func(ctx context.Context, callID, userID, _ string) (*call.Call, error) {
+		return s.calls.Hangup(ctx, callID, userID)
 	})
 }
 
@@ -190,13 +191,14 @@ func (s *Server) handleGetPresence(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.presence.GetUser(appID, userID))
 }
 
-func (s *Server) withActor(w http.ResponseWriter, r *http.Request, fn func(callID, userID, deviceID string) (*call.Call, error)) {
+func (s *Server) withActor(w http.ResponseWriter, r *http.Request, fn func(ctx context.Context, callID, userID, deviceID string) (*call.Call, error)) {
 	if s.calls == nil {
 		writeError(w, domain.Internal("call service unavailable"))
 		return
 	}
 	var req callActorRequest
 	_ = decodeJSON(r, &req)
+
 	userID, err := auth.RequireUserID(r.Context(), req.UserID)
 	if err != nil {
 		writeError(w, err)
@@ -206,7 +208,8 @@ func (s *Server) withActor(w http.ResponseWriter, r *http.Request, fn func(callI
 	if req.DeviceID != "" {
 		deviceID = req.DeviceID
 	}
-	c, err := fn(r.PathValue("id"), userID, deviceID)
+
+	c, err := fn(r.Context(), r.PathValue("id"), userID, deviceID)
 	if err != nil {
 		writeError(w, err)
 		return
