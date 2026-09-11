@@ -1,41 +1,41 @@
-# mgl-push
+# mgl-communication
 
-Unified Device Push & Incoming Communication Event Infrastructure for Flutter / ClojureDart.
-
-**Spec:** [mgl-push-spec-2.1.md](mgl-push-spec-2.1.md)
+Unified Device Push, Incoming Call Events, and Realtime Communication Infrastructure for Flutter / ClojureDart.
 
 ## Scope
 
 | Library | Responsibility |
 |---------|----------------|
-| **mgl-push** | Notify / Wake / Deliver Event (this repo) |
-| **mgl-call** | CallKit / LCK / Telecom / Signaling / WebRTC (separate repo) |
+| **mgl-push** | Notify / Wake / Deliver Event |
+| **mgl-call** | Client WebRTC / Media / CallKit |
+| **mgl-realtime-server** | Go Realtime Server: Push + Presence + Call Runtime + Signaling + SFU |
 
-This repository does **not** implement CallKit, LiveCommunicationKit, Android Telecom, or WebRTC.  
-The only stable contract with `mgl-call` is **PushEvent** (`incoming-call` / `call-cancelled` / `call-ended`).
+Push and Call stay loosely coupled: cold-start wake uses **PushEvent** (`incoming-call` / `call-cancelled` / `call-ended`); foreground uses **WebSocket**.
+
+> Go owns realtime; Phoenix owns business; SFU owns media.
 
 ## Repository layout
 
 ```text
-mgl-push/
-├── mgl-push-client/      # Flutter plugin (Dart + Android/iOS native)
-├── mgl-push-cljd/        # ClojureDart API (thin wrapper, no vendor logic)
-├── mgl-push-server/      # Go Push Gateway
-├── mgl-push-protocol/    # JSON Schema (PushEvent / Device / etc.)
+mgl-communication/
+├── mgl-push-client/           # Flutter plugin (Dart + Android/iOS native)
+├── mgl-push-cljd/             # ClojureDart API (thin wrapper)
+├── mgl-realtime-server/       # Go Realtime Communication Server
+├── mgl-call/                  # WebRTC / media / call lifecycle (client)
+├── mgl-push-protocol/         # JSON Schema (PushEvent / Device / etc.)
 ├── docs/
 ├── docker-compose.yml
-├── .env.example
-└── mgl-push-spec-2.1.md
+└── .env.example
 ```
 
-## MVP status (spec §148–150)
+## Status
 
-| Phase | Scope | Status |
-| --- | --- | --- |
-| **Phase 1** | Core, Installation ID, Token, APNs/FCM, PushEvent, Incoming Call, dedupe, Pending | ✓ |
-| **Phase 2** | Huawei + Xiaomi | ✓ (Xiaomi requires host SDK + Receiver) |
-| **Phase 3** | OPPO + vivo | ✓ (host SDK; reflection Bridge) |
-| **mgl-call** | System Call + WebRTC | Separate repo |
+| Area | Scope | Status |
+|------|-------|--------|
+| **Push Phase 1–3** | Device, APNs/FCM, Huawei/Xiaomi/OPPO/vivo, Incoming Call Push | ✓ |
+| **Realtime Phase 1–4** | JWT, WS, Presence, Call Runtime, 1:1/Group, Multi-device, Resume, rate limits | ✓ (single-node in-memory) |
+| **Realtime Phase 5** | Redis / horizontal scaling | ○ |
+| **mgl-call** | Client Signaling / WebRTC / Media | In-repo (`mgl-call/`) |
 
 ## Quick start
 
@@ -82,7 +82,22 @@ curl -X POST http://localhost:8080/v1/messages \
   }'
 ```
 
-### Incoming Call
+### Create a call (Runtime + Incoming Call Push)
+
+```bash
+curl -X POST http://localhost:8080/api/v1/calls \
+  -H "Authorization: Bearer dev-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "caller_id": "user_123",
+    "callee_id": "user_456",
+    "type": "video",
+    "mode": "direct",
+    "caller_name": "Alice"
+  }'
+```
+
+### Incoming Call Push (low-level; usually triggered by Call Runtime)
 
 ```bash
 curl -X POST http://localhost:8080/v1/messages/incoming-call \
@@ -101,14 +116,15 @@ curl -X POST http://localhost:8080/v1/messages/incoming-call \
   }'
 ```
 
-### Call cancelled / ended
+### WebSocket
 
-```bash
-curl -X POST http://localhost:8080/v1/messages/call-cancelled \
-  -H "Authorization: Bearer dev-token" \
-  -H "Content-Type: application/json" \
-  -d '{ "call_id": "call_123", "user_ids": ["user_456"] }'
+```text
+ws://localhost:8080/ws
+→ { "type": "authenticate", "token": "<user-JWT>", "device_id": "…" }
+→ call.create / accept / webrtc.offer / …
 ```
+
+See [docs/REALTIME.md](docs/REALTIME.md).
 
 ## Client usage
 
@@ -176,11 +192,12 @@ Lifecycle events: `token_changed` · `notification_open` · `error`.
 
 | Doc | Content |
 |-----|---------|
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layers, boundaries, delivery semantics |
-| [CLIENT.md](docs/CLIENT.md) | Flutter / CLJD / platform integration |
-| [SERVER.md](docs/SERVER.md) | Go modules, worker, migrations |
-| [API.md](docs/API.md) | Full HTTP API reference |
-| [PROVIDERS.md](docs/PROVIDERS.md) | Vendor config and capabilities |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | System boundaries, Push / Realtime layers |
+| [REALTIME.md](docs/REALTIME.md) | **WS / Call / Presence / SFU / multi-device** |
+| [CLIENT.md](docs/CLIENT.md) | Flutter / CLJD / platform |
+| [SERVER.md](docs/SERVER.md) | Go modules, pipelines, implementation phases |
+| [API.md](docs/API.md) | HTTP + WS endpoint reference |
+| [PROVIDERS.md](docs/PROVIDERS.md) | Vendor configuration |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Env vars and deployment |
 | [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common issues |
 
@@ -192,6 +209,8 @@ Protocol schemas: [`mgl-push-protocol/`](mgl-push-protocol/)
 2. `installation_id` ≠ vendor token
 3. Provider credentials exist only on the Go server
 4. At-least-once delivery; clients dedupe with `event_id` + `call_id`
-5. No dependency on `flutter_webrtc` / `mgl-call`
+5. No dependency on `flutter_webrtc` / `mgl-call` inside Push
 6. Keep the PushEvent contract stable and backward-compatible
 7. Keep Incoming Call payloads small (no SDP / ICE / TURN)
+8. One Go binary, modular packages — no premature microservice split
+9. Call API hides P2P vs SFU; runtime chooses transport

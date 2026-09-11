@@ -6,7 +6,7 @@ class MglPushConfig {
     this.registerOnInitialize = true,
   });
 
-  /// Base URL of mgl-push-server, e.g. https://push.example.com
+  /// Base URL of mgl-realtime-server, e.g. https://push.example.com
   final String serverUrl;
 
   /// Bearer service token (same as server MGL_PUSH_SERVICE_TOKENS).

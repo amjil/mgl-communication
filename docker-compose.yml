@@ -1,4 +1,4 @@
-# mgl-push Docker Compose (Phase 1)
+# mgl-communication Docker Compose (Phase 1)
 
 services:
   postgres:
@@ -11,17 +11,17 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./mgl-push-server/migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
-      - ./mgl-push-server/migrations/002_v21_events.sql:/docker-entrypoint-initdb.d/002_v21_events.sql:ro
+      - ./mgl-realtime-server/migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+      - ./mgl-realtime-server/migrations/002_v21_events.sql:/docker-entrypoint-initdb.d/002_v21_events.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U mglpush -d mglpush"]
       interval: 5s
       timeout: 5s
       retries: 10
 
-  mgl-push:
+  mgl-communication:
     build:
-      context: ./mgl-push-server
+      context: ./mgl-realtime-server
       dockerfile: Dockerfile
     depends_on:
       postgres:

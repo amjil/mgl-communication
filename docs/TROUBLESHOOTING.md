@@ -7,6 +7,7 @@
 | `postgres: unavailable` | Check `MGL_PUSH_DATABASE_URL`; confirm migrations applied |
 | `providers: none` | Registry empty (unexpected) |
 | `worker: stopped` | Worker not started or already exited |
+| `websocket: disabled` | Hub not wired (unexpected) |
 
 Missing vendor credentials still register **noop**, so `providers` is usually not `none`.
 
@@ -15,18 +16,50 @@ Missing vendor credentials still register **noop**, so `providers` is usually no
 If an old volume only has `001`, run:
 
 ```bash
-psql "$MGL_PUSH_DATABASE_URL" -f mgl-push-server/migrations/002_v21_events.sql
+psql "$MGL_PUSH_DATABASE_URL" -f mgl-realtime-server/migrations/002_v21_events.sql
 ```
 
 Or recreate the Compose volume.
 
 ## Device registration 401
 
-`Authorization: Bearer …` must be listed in `MGL_PUSH_SERVICE_TOKENS`, and `app_id` must match the token mapping.
+`Authorization: Bearer …` must be listed in `MGL_PUSH_SERVICE_TOKENS`, and `app_id` must match the token mapping.  
+Call / Presence may also use a user JWT (`sub` + `app`); secret is `MGL_PUSH_JWT_SECRET`.
 
 ## Device registration 403 app_id mismatch
 
 Request body `app_id` must match the app bound to the service token.
+
+## WebSocket `authenticate` → UNAUTHORIZED
+
+- JWT must be HS256 with the same secret as the server
+- `sub` / `app` required; `exp` must not be expired
+- Connect to `/ws` first, then send `{ "type":"authenticate", "token":"…" }` (do not expect Upgrade Header JWT alone)
+
+## WebSocket `RATE_LIMITED`
+
+- Signaling: ~30 msg/s per connection by default (`MGL_PUSH_WS_MSG_PER_SEC`)
+- Call create: ~20/min per user (`MGL_PUSH_CALLS_PER_MINUTE`)
+
+## Call create 403 not allowed
+
+When `MGL_PUSH_PHOENIX_BASE_URL` is set, Phoenix `/v1/calls/authorize` returned `allowed:false` or is unavailable.  
+For development, clear `PHOENIX_BASE_URL` (allow-all).
+
+## Call `CALL_NOT_FOUND` after restart
+
+Call Runtime is **in-memory**; sessions are lost on process restart. Clients should `call.create` again or treat the call as ended. Multi-node / persistence is Phase 5 (Redis).
+
+## Other devices keep ringing after accept
+
+- Use `/api/v1/calls/{id}/accept` or WS `call.accept` (sends `call.stop_ringing` + Push)
+- Manual `/v1/messages/incoming-call` alone does not coordinate multi-device; business must send `call-cancelled`
+- Clients should handle `call.stop_ringing` / `call-cancelled` (`accepted_elsewhere`)
+
+## Resume missing ICE / SFU token
+
+- P2P: check `MGL_PUSH_ICE_SERVERS`
+- Group: check LiveKit URL/key/secret; without them only stub tokens are issued (cannot join real media)
 
 ## Send succeeds but no notification arrives
 
@@ -44,7 +77,7 @@ Client must listen for `token_changed` (auto after `initialize`) and `PUT /v1/de
 - Check whether `expires_at` has passed (client drops expired events)
 - iOS: VoIP token / PushKit present? CallKit UI belongs to **mgl-call**
 - Android: cold start must call `consumePendingEvents` (`initialize` does this automatically)
-- Multi-device: after one answers, send `call-cancelled` to the others
+- Multi-device: after one answers, server sends stop-ringing / `call-cancelled`
 
 ## Duplicate incoming-call UI
 
@@ -93,5 +126,5 @@ Should not happen. `initialize` catches errors; if it still crashes, file an iss
 
 ## Log safety
 
-OK to log: `message_id` · `event_id` · `call_id` · `device_id` · `provider` · `status`  
-**Do not** log: push tokens, APNs/FCM/vendor secrets, sensitive payloads.
+OK to log: `message_id` · `event_id` · `call_id` · `device_id` · `provider` · `status` · `user_id`  
+**Do not** log: push tokens, JWT, APNs/FCM/vendor secrets, full SDP, sensitive payloads.

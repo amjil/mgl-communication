@@ -13,7 +13,7 @@ Host `deps.edn`:
         {:git/url "https://github.com/tensegritics/ClojureDart.git"
          :sha "81b5c03a55cf52b21dc0be8ccfa4827b9889f488"}
         amjil/mgl-push
-        {:local/root "../mgl-push/mgl-push-cljd"}}
+        {:local/root "../mgl-communication/mgl-push-cljd"}}
  :aliases {:cljd {:main-opts ["-m" "cljd.build"]}}
  :cljd/opts {:kind :flutter
              :main your.app.main}}
@@ -24,7 +24,7 @@ Host `pubspec.yaml` must also depend on the Flutter plugin:
 ```yaml
 dependencies:
   mgl_push:
-    path: ../mgl-push/mgl-push-client
+    path: ../mgl-communication/mgl-push-client
 ```
 
 ## API (spec §12)

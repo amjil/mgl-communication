@@ -6,7 +6,7 @@ Pod::Spec.new do |s|
   s.version          = '0.1.0'
   s.summary          = 'mgl-push Flutter client plugin'
   s.description      = 'Cross-platform push client for mgl-push'
-  s.homepage         = 'https://github.com/amjil/mgl-push'
+  s.homepage         = 'https://github.com/amjil/mgl-communication'
   s.license          = { :type => 'MIT' }
   s.author           = { 'amjil' => 'dev@amjil.net' }
   s.source           = { :path => '.' }

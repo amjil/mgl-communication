@@ -1,9 +1,23 @@
 # API
 
-Base: `/v1`  
-Auth: `Authorization: Bearer <service-token>` (maps to `app_id`)
+Base paths:
 
-Optional: `Idempotency-Key` (message endpoints, spec §86). Duplicate requests return the same `message_id` with `duplicate: true`.
+- Push (compat): `/v1/...`
+- Spec alias: `/api/v1/...` (devices / messages same as `/v1`)
+- Realtime Call / Presence: `/api/v1/calls`, `/api/v1/presence`
+- WebSocket: `GET /ws`
+
+Auth:
+
+| Use | Header |
+|-----|--------|
+| Business backend Push / Call | `Authorization: Bearer <service-token>` → `app_id` |
+| Client Call / Presence | `Authorization: Bearer <user-JWT>` (claims: `sub`, `app`, optional `device_id`) |
+| WebSocket | Upgrade unauthenticated; first message `authenticate` carries JWT |
+
+Optional: `Idempotency-Key` (message endpoints). Duplicate requests return the same `message_id` with `duplicate: true`.
+
+Realtime details: [REALTIME.md](REALTIME.md).
 
 ## Endpoints
 
@@ -12,15 +26,27 @@ Optional: `Idempotency-Key` (message endpoints, spec §86). Duplicate requests r
 | GET | `/health` | Liveness |
 | GET | `/ready` | Postgres + providers + worker |
 | GET | `/metrics` | Prometheus |
-| POST | `/v1/devices` | Register / upsert device |
-| PUT | `/v1/devices/{installation_id}/token` | Update token |
-| PUT | `/v1/devices/{installation_id}/user` | Bind user |
-| DELETE | `/v1/devices/{installation_id}/user` | Unbind user |
-| DELETE | `/v1/devices/{installation_id}` | Unregister (`status=disabled`) |
-| POST | `/v1/messages` | Notification / silent / background |
-| POST | `/v1/messages/incoming-call` | Incoming-call Push |
-| POST | `/v1/messages/call-cancelled` | Cancel ringing |
-| POST | `/v1/messages/call-ended` | Call ended |
+| GET | `/ws` | WebSocket Signaling |
+| POST | `/v1/devices` · `/api/v1/devices` | Register / upsert device |
+| PUT | `…/devices/{installation_id}/token` | Update token |
+| PUT | `…/devices/{installation_id}/user` | Bind user |
+| DELETE | `…/devices/{installation_id}/user` | Unbind user |
+| DELETE | `…/devices/{installation_id}` | Unregister (`status=disabled`) |
+| POST | `…/messages` | Notification / silent / background |
+| POST | `…/messages/incoming-call` | Incoming-call Push |
+| POST | `…/messages/call-cancelled` | Cancel ringing |
+| POST | `…/messages/call-ended` | Call ended |
+| POST | `/api/v1/calls` | Create call runtime |
+| GET | `/api/v1/calls/{id}` | Get call |
+| POST | `/api/v1/calls/{id}/accept` | Accept (multi-device stop ringing) |
+| POST | `/api/v1/calls/{id}/reject` | Reject |
+| POST | `/api/v1/calls/{id}/cancel` | Cancel |
+| POST | `/api/v1/calls/{id}/join` | Join |
+| POST | `/api/v1/calls/{id}/leave` | Leave |
+| POST | `/api/v1/calls/{id}/hangup` | Hangup |
+| POST | `/api/v1/calls/{id}/token` | Call / SFU token + ICE |
+| POST | `/api/v1/calls/{id}/resume` | Recovery snapshot |
+| GET | `/api/v1/presence/{user_id}` | User presence |
 
 ## Device registration
 
@@ -113,6 +139,8 @@ Idempotency-Key: incoming:call_123:user_456
 - Payload must **not** include SDP / ICE / TURN / long-lived credentials
 - Incoming Call does **not** use ordinary collapse
 
+> Prefer creating calls via `/api/v1/calls` or WebSocket `call.create`; the Incoming Call module sends Push automatically.
+
 ## Call cancelled / ended
 
 ```http
@@ -135,7 +163,107 @@ POST /v1/messages/call-ended
 }
 ```
 
-Optional `reason`: `user-ended` · `remote-ended` · `rejected` · `timeout` · `cancelled` · `failed` · `busy`
+Optional `reason`: `user-ended` · `remote-ended` · `rejected` · `timeout` · `cancelled` · `failed` · `busy` · `accepted_elsewhere`
+
+## Call Runtime
+
+```http
+POST /api/v1/calls
+Authorization: Bearer <service-token|user-JWT>
+```
+
+```json
+{
+  "caller_id": "user_a",
+  "callee_id": "user_b",
+  "type": "video",
+  "mode": "direct",
+  "device_id": "device_a",
+  "caller_name": "Alice"
+}
+```
+
+- `callee_ids` may replace `callee_id` (group)
+- With user JWT, `caller_id` may be omitted (taken from `sub`)
+- On success, Incoming Call Push is sent automatically; `201` returns the full Call object
+
+```http
+POST /api/v1/calls/{id}/accept
+{ "user_id": "user_b", "device_id": "iphone" }
+```
+
+After accept: other devices of the same user receive stop-ringing Push (`accepted_elsewhere`).
+
+```http
+POST /api/v1/calls/{id}/token
+{ "user_id": "user_b" }
+```
+
+```json
+{
+  "call_id": "call_…",
+  "room_id": "room_…",
+  "token": "…",
+  "transport": "p2p",
+  "ice_servers": [{ "urls": ["stun:stun.l.google.com:19302"] }],
+  "role": "callee",
+  "expires_in": 300
+}
+```
+
+Group/`sfu` responses also include `sfu_url`.
+
+```http
+POST /api/v1/calls/{id}/resume
+{ "user_id": "user_b", "device_id": "iphone" }
+```
+
+Returns `call` + `participants` + `room` + `token` + `ice_servers` (see REALTIME.md).
+
+## Presence
+
+```http
+GET /api/v1/presence/{user_id}
+```
+
+```json
+{
+  "user_id": "user_b",
+  "app_id": "nomio",
+  "status": "online",
+  "devices": [
+    { "device_id": "iphone", "status": "online", "updated_at": "…" }
+  ],
+  "updated_at": "…"
+}
+```
+
+## WebSocket
+
+```http
+GET /ws
+```
+
+Message Envelope:
+
+```json
+{
+  "id": "msg_…",
+  "type": "call.create",
+  "timestamp": "2026-01-01T12:00:00Z",
+  "call_id": "",
+  "sender_id": "",
+  "data": { "callee_id": "user_b", "type": "audio" }
+}
+```
+
+Authenticate:
+
+```json
+{ "type": "authenticate", "token": "<JWT>", "device_id": "…", "reconnect": false }
+```
+
+Full event table: [REALTIME.md](REALTIME.md).
 
 ## Message types
 
@@ -145,7 +273,7 @@ Optional `reason`: `user-ended` · `remote-ended` · `rejected` · `timeout` · 
 | `silent` | Data-only / sync |
 | `background` | Background wake |
 | `incoming_call` | Incoming-call wake |
-| `call_cancelled` | Caller cancelled |
+| `call_cancelled` | Caller cancelled / stop ringing |
 | `call_ended` | Call ended |
 
 ## Error format
@@ -154,7 +282,9 @@ Optional `reason`: `user-ended` · `remote-ended` · `rejected` · `timeout` · 
 { "error": { "code": "DEVICE_NOT_FOUND", "message": "Device not found" } }
 ```
 
-Common codes: `INVALID_REQUEST` · `FORBIDDEN` · `DEVICE_NOT_FOUND` · `UNAUTHORIZED`
+Common codes: `INVALID_REQUEST` · `FORBIDDEN` · `DEVICE_NOT_FOUND` · `CALL_NOT_FOUND` · `UNAUTHORIZED`
+
+WebSocket: `{ "type": "error", "data": { "code": "RATE_LIMITED", "message": "…" } }`
 
 ## Data payload
 
