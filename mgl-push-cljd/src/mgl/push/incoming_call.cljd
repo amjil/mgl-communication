@@ -1,0 +1,14 @@
+(ns mgl.push.incoming-call
+  "Incoming call push event helpers (mgl-call integration boundary)."
+  (:require [mgl.push.events :as e]))
+
+(def incoming-call? e/incoming-call?)
+(def call-cancelled? e/call-cancelled?)
+(def call-ended? e/call-ended?)
+(def call-id e/call-id)
+
+(defn call-data
+  "Extract call payload map from an incoming-call DomainPushEvent."
+  [event]
+  (when (e/incoming-call? event)
+    (e/event-data event)))

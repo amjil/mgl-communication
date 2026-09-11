@@ -14,8 +14,9 @@ var allowedProviders = map[string]bool{
 	domain.ProviderXiaomi: true,
 	domain.ProviderOppo:   true,
 	domain.ProviderVivo:   true,
-	domain.ProviderFCM:    true,
-	domain.ProviderAPNs:   true,
+	domain.ProviderFCM:      true,
+	domain.ProviderAPNs:     true,
+	domain.ProviderAPNsVoIP: true,
 }
 
 var allowedPlatforms = map[string]bool{

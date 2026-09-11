@@ -1,26 +1,44 @@
 # Architecture
 
+## High-level
+
+```text
+                    Application
+                         │
+              ┌──────────┴──────────┐
+              │                     │
+          mgl-push               mgl-call
+              │                     │
+       Push / Events          Call / WebRTC
+              │                     │
+       Native Push SDK        CallKit / LCK / Telecom
+              │                     │
+     APNs / FCM / Vendors     flutter_webrtc
+```
+
 ```text
 Business (Phoenix / etc)
-        │ HTTP Bearer
+        │ HTTP Bearer + Idempotency-Key
         ▼
  mgl-push-server (Go)
-   ├── API
+   ├── API (/v1/devices, /v1/messages, …)
    ├── DeviceService / MessageService
    ├── Repository (PostgreSQL)
-   ├── Queue Worker
-   ├── Retry
+   ├── Queue Worker + Retry
    └── Provider Registry
-         ├── noop (Phase 1)
-         ├── fcm (Phase 2)
-         ├── apns (Phase 3)
-         └── huawei / xiaomi / oppo / vivo
+         ├── fcm · apns · apns_voip
+         ├── huawei · xiaomi
+         ├── oppo · vivo
+         └── noop (fallback when credentials are missing; does not block startup)
                 │
                 ▼
          Mobile OS Push
                 │
                 ▼
      Flutter / ClojureDart client
+         ├── DomainPushEvent stream
+         ├── event_id / call_id dedupe
+         └── PendingNativeStore (cold start)
 ```
 
 ## Layers
@@ -29,18 +47,45 @@ Business (Phoenix / etc)
 API → Service → Repository / Provider
 ```
 
-The business domain may only use: `Message`, `Device`, `Delivery`, and provider name strings.
+The business layer only sees: `Message`, `Device`, `Delivery`, and provider name strings.  
+Vendor payload types must not appear in Service / API.
 
-Vendor payload types must not appear in Service or API layers.
+## Message types
+
+| Type | Transport intent |
+|------|------------------|
+| `notification` | Visible notification |
+| `silent` / `background` | Data-only / background wake (execution not guaranteed) |
+| `incoming_call` | High-priority / VoIP incoming-call wake |
+| `call_cancelled` / `call_ended` | Cancel / end signaling-style Push |
+
+On iOS, Incoming Call prefers `apns_voip` when a VoIP token exists; otherwise high-priority APNs.  
+Android uses the device’s current vendor / FCM with data-only + high priority.
 
 ## Client
 
-- Native SDKs own the long-lived connection and system notifications
-- Flutter talks via MethodChannel / EventChannel
-- EventBuffer keeps events when cold start or listeners are not ready yet
+- The native SDK owns the long-lived connection and system notifications
+- Flutter: `MethodChannel` / `EventChannel`
+- `EventBuffer` + `EventDeduper`: cold-start buffering and dedupe
+- `PendingNativeStore` (Android) / `PendingEventStore` (iOS): persist when Flutter is not running yet; TTL ~30–120s
+- Incoming-call events past `expires_at` are dropped on the client
 
 ## Delivery semantics
 
-- `accepted`: the provider accepted the request
-- `delivered` / `opened`: reserved for later phases
-- Delivery model: at-least-once; clients dedupe with `mgl_message_id`
+| Status | Meaning |
+|--------|---------|
+| `accepted` | Provider accepted the request (≠ user saw / answered) |
+| `delivered` / `opened` | Reserved |
+| `failed` | Permanent failure (including invalid token) |
+
+Delivery model: **at-least-once**. Clients must dedupe with `mgl_event_id` (and `call_id` for call scenarios).
+
+## Boundary with mgl-call
+
+```text
+mgl-push  →  PushEvent(incoming-call)  →  Application  →  mgl-call
+```
+
+- mgl-push does **not** `require` mgl-call
+- mgl-call does **not** hard-depend on mgl-push (foreground can use WebSocket)
+- CallKit / LCK / Telecom / WebRTC all belong to mgl-call

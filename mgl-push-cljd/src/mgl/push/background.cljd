@@ -1,0 +1,6 @@
+(ns mgl.push.background
+  "Silent / background push helpers."
+  (:require [mgl.push.events :as e]))
+
+(def silent? e/silent?)
+(def background? e/background?)

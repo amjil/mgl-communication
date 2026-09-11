@@ -40,15 +40,41 @@ func TestBuildFormNotification(t *testing.T) {
 	}
 }
 
-func TestBuildFormDataOnly(t *testing.T) {
+func TestBuildFormPrefersConfiguredPackage(t *testing.T) {
 	form, err := buildForm(&domain.Message{
-		Data: map[string]string{"type": "sync"},
-	}, &domain.Device{Token: "r", AppID: "pkg"}, "")
+		Title: "t", Body: "b",
+	}, &domain.Device{Token: "r", AppID: "business.app.id"}, "net.amjil.real")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if form.Get("restricted_package_name") != "net.amjil.real" {
+		t.Fatalf("got %s", form.Get("restricted_package_name"))
+	}
+}
+
+func TestBuildFormRejectsNonPackageAppID(t *testing.T) {
+	_, err := buildForm(&domain.Message{Data: map[string]string{"a": "b"}},
+		&domain.Device{Token: "r", AppID: "not-a-package"}, "")
+	if err == nil {
+		t.Fatal("expected error when package missing")
+	}
+}
+
+func TestBuildFormIncomingCallPassThrough(t *testing.T) {
+	form, err := buildForm(&domain.Message{
+		Type:     domain.MessageIncomingCall,
+		Priority: domain.PriorityHigh,
+		TTL:      30 * time.Second,
+		Data:     map[string]string{"call_id": "c1"},
+	}, &domain.Device{Token: "r", AppID: "net.amjil.demo"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if form.Get("pass_through") != "1" {
 		t.Fatal(form)
+	}
+	if form.Get("extra.cb") != "1" {
+		t.Fatal("expected high priority callback flag")
 	}
 }
 

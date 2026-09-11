@@ -7,7 +7,7 @@ import android.util.Log
 import java.lang.reflect.Proxy
 
 /**
- * vivo Push provider (Phase 7).
+ * vivo Push provider (Phase 3).
  *
  * Host app must add vivo Push SDK and meta-data:
  * - VIVO_APP_ID
@@ -34,7 +34,7 @@ class VivoProvider(private val context: Context) : PushProvider {
 
     override fun initialize(callback: ProviderCallback) {
         this.callback = callback
-        VivoBridge.register(this)
+        VivoBridge.register(this, context)
         try {
             val clientClass = Class.forName(PUSH_CLIENT)
             val getInstance = clientClass.getMethod("getInstance", Context::class.java)
@@ -197,9 +197,15 @@ class VivoProvider(private val context: Context) : PushProvider {
 
 object VivoBridge {
     @Volatile private var provider: VivoProvider? = null
+    @Volatile private var appContext: android.content.Context? = null
 
     fun register(p: VivoProvider) {
         provider = p
+    }
+
+    fun register(p: VivoProvider, context: android.content.Context) {
+        provider = p
+        appContext = context.applicationContext
     }
 
     fun unregister(p: VivoProvider) {
@@ -211,15 +217,29 @@ object VivoBridge {
     }
 
     fun onMessage(title: String?, content: String?, extra: Map<String, String>) {
-        provider?.onMessage(
-            ProviderMessage(
-                messageId = extra["mgl_message_id"],
-                title = title,
-                body = content,
-                data = extra,
-                deepLink = extra["deep_link"]
-            )
+        onMessage(appContext, title, content, extra)
+    }
+
+    fun onMessage(
+        context: android.content.Context?,
+        title: String?,
+        content: String?,
+        extra: Map<String, String>
+    ) {
+        if (context != null) appContext = context.applicationContext
+        val message = ProviderMessage(
+            messageId = extra["mgl_message_id"] ?: extra["mgl_event_id"],
+            title = title,
+            body = content,
+            data = extra,
+            deepLink = extra["deep_link"]
         )
+        val p = provider
+        if (p != null) {
+            p.onMessage(message)
+        } else {
+            PendingNativeStore.saveProviderMessage(appContext, "vivo", message)
+        }
     }
 
     fun onNotificationOpened(extra: Map<String, String>) {

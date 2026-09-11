@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:device_info_plus/device_info_plus.dart';
@@ -7,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ulid/ulid.dart';
 
 import '../channel/push_channel.dart';
+import '../models/push_capabilities.dart';
 import '../models/push_device.dart';
 import '../models/push_event.dart';
 import '../models/push_message.dart';
@@ -31,6 +33,7 @@ class MglPushImpl implements MglPush {
 
   PushDevice? _device;
   bool _initialized = false;
+  StreamSubscription<PushEvent>? _tokenRefreshSub;
 
   @override
   Stream<PushMessage> get messages => _channel.messages;
@@ -39,33 +42,43 @@ class MglPushImpl implements MglPush {
   Stream<PushEvent> get events => _channel.events;
 
   @override
-  Future<void> initialize() async {
-    if (_initialized) return;
-    try {
-      await _channel.invoke('initialize');
-      // Drain cold-start notification if present.
-      final initial = await _channel.invokeMap('getInitialNotification');
-      if (initial != null && initial.isNotEmpty) {
-        // Native also emits via EventChannel; getInitialNotification is a safety net.
-      }
-      _listenTokenRefresh();
-      if (_config.registerOnInitialize) {
-        // Non-blocking for callers who don't await deeply; still awaited here.
-        try {
-          await register();
-        } catch (_) {
-          // Push init must never crash the app.
+  Future<PushDevice?> initialize() async {
+    if (_initialized) {
+      return _device ?? await getDevice();
+    }
+    await _channel.invoke('initialize');
+    // Drain cold-start / pending native events into the event stream.
+    final pending = await _channel.invoke('consumePendingEvents');
+    if (pending is List) {
+      for (final item in pending) {
+        if (item is Map) {
+          _channel.inject(parsePushEvent(Map<Object?, Object?>.from(item)));
         }
       }
-      _initialized = true;
-    } catch (_) {
-      // Spec §54: initialization failure must not fail app startup.
-      _initialized = true;
     }
+    final initial = await _channel.invokeMap('getInitialNotification');
+    if (initial != null && initial.isNotEmpty) {
+      _channel.inject(parsePushEvent(initial));
+    }
+    _listenTokenRefresh();
+    if (_config.registerOnInitialize) {
+      try {
+        await register();
+      } catch (e) {
+        // Native init succeeded; surface register failure without blocking init.
+        _channel.inject(ErrorEvent(
+          code: 'REGISTER_FAILED',
+          message: e.toString(),
+        ));
+      }
+    }
+    _initialized = true;
+    return _device ?? await getDevice();
   }
 
   void _listenTokenRefresh() {
-    events.listen((event) async {
+    if (_tokenRefreshSub != null) return;
+    _tokenRefreshSub = events.listen((event) async {
       if (event is TokenChangedEvent) {
         final device = _device ?? await getDevice();
         if (device == null) return;
@@ -86,7 +99,13 @@ class MglPushImpl implements MglPush {
             locale: device.locale,
             timezone: device.timezone,
           );
-        } catch (_) {}
+        } catch (e) {
+          _channel.inject(ErrorEvent(
+            code: 'TOKEN_SYNC_FAILED',
+            message: e.toString(),
+            provider: event.provider,
+          ));
+        }
       }
     });
   }
@@ -96,6 +115,7 @@ class MglPushImpl implements MglPush {
     final installationId = await _ensureInstallationId();
     final native = await _channel.invokeMap('register') ?? {};
     final meta = await _deviceMeta();
+    final caps = await getCapabilities();
 
     final device = PushDevice(
       installationId: installationId,
@@ -111,7 +131,6 @@ class MglPushImpl implements MglPush {
     );
 
     if (device.token.isEmpty) {
-      // Phase 1 stub may return empty token on unsupported platforms (e.g. desktop).
       _device = device;
       return device;
     }
@@ -122,6 +141,13 @@ class MglPushImpl implements MglPush {
     final body = {
       ...device.toJson(),
       if (userId != null && userId.isNotEmpty) 'user_id': userId,
+      'providers': caps.providers,
+      'capabilities': [
+        if (caps.notification) 'notification',
+        if (caps.silentPush) 'silent',
+        if (caps.backgroundPush) 'background',
+        if (caps.incomingCallPush) 'incoming_call',
+      ],
     };
     await _postJson('/v1/devices', body);
     _device = device;
@@ -185,6 +211,39 @@ class MglPushImpl implements MglPush {
   @override
   Future<void> requestPermission() async {
     await _channel.invoke('requestPermission');
+  }
+
+  @override
+  Future<PushCapabilities> getCapabilities() async {
+    try {
+      final map = await _channel.invokeMap('getCapabilities');
+      if (map != null && map.isNotEmpty) {
+        return PushCapabilities.fromMap(map);
+      }
+    } catch (_) {}
+    // Sensible defaults when native method is unavailable.
+    final device = _device ?? await getDevice();
+    final platform = device?.platform ?? '';
+    final provider = device?.provider ?? '';
+    final providers = <String>[];
+    if (provider.isNotEmpty) providers.add(provider);
+    if (platform == 'ios') {
+      if (!providers.contains('apns')) providers.add('apns');
+      return PushCapabilities(
+        notification: true,
+        silentPush: true,
+        backgroundPush: true,
+        incomingCallPush: true,
+        providers: providers.isEmpty ? ['apns', 'apns_voip'] : [...providers, 'apns_voip'],
+      );
+    }
+    return PushCapabilities(
+      notification: true,
+      silentPush: true,
+      backgroundPush: true,
+      incomingCallPush: true,
+      providers: providers.isEmpty ? ['fcm'] : providers,
+    );
   }
 
   Future<String> _ensureInstallationId() async {

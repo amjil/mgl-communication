@@ -1,0 +1,12 @@
+(ns mgl.push.config
+  "Config helpers for mgl-push.")
+
+(defn config
+  "Build a config map.
+   Required: :server-url :service-token :app-id"
+  [{:keys [server-url service-token app-id register-on-initialize]
+    :or {register-on-initialize true}}]
+  {:server-url server-url
+   :service-token service-token
+   :app-id app-id
+   :register-on-initialize register-on-initialize})

@@ -31,6 +31,9 @@ func (r *MessageRepository) Create(ctx context.Context, m *domain.Message) (*dom
 	if m.Priority == "" {
 		m.Priority = domain.PriorityNormal
 	}
+	if m.Type == "" {
+		m.Type = domain.MessageNotification
+	}
 	m.CreatedAt = now
 
 	dataJSON, err := json.Marshal(m.Data)
@@ -45,16 +48,16 @@ func (r *MessageRepository) Create(ctx context.Context, m *domain.Message) (*dom
 
 	const q = `
 INSERT INTO push_messages (
-  id, app_id, title, body, data, image_url, priority, ttl_seconds,
+  id, app_id, type, title, body, data, image_url, priority, ttl_seconds,
   collapse_key, sound, badge, deep_link, category, status, created_at
 ) VALUES (
-  $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15
+  $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16
 )
-RETURNING id, app_id, title, body, data, image_url, priority, ttl_seconds,
+RETURNING id, app_id, type, title, body, data, image_url, priority, ttl_seconds,
   collapse_key, sound, badge, deep_link, category, status, created_at, queued_at, completed_at
 `
 	return scanMessage(r.db.QueryRow(ctx, q,
-		m.ID, m.AppID, nullStr(m.Title), nullStr(m.Body), dataJSON, nullStr(m.ImageURL),
+		m.ID, m.AppID, string(m.Type), nullStr(m.Title), nullStr(m.Body), dataJSON, nullStr(m.ImageURL),
 		m.Priority, ttlSeconds, nullStr(m.CollapseKey), nullStr(m.Sound), m.Badge,
 		nullStr(m.DeepLink), nullStr(m.Category), m.Status, m.CreatedAt,
 	))
@@ -91,14 +94,14 @@ func (r *MessageRepository) FindByID(ctx context.Context, appID, id string) (*do
 	)
 	if appID == "" {
 		const q = `
-SELECT id, app_id, title, body, data, image_url, priority, ttl_seconds,
+SELECT id, app_id, type, title, body, data, image_url, priority, ttl_seconds,
   collapse_key, sound, badge, deep_link, category, status, created_at, queued_at, completed_at
 FROM push_messages WHERE id = $1
 `
 		row = r.db.QueryRow(ctx, q, id)
 	} else {
 		const q = `
-SELECT id, app_id, title, body, data, image_url, priority, ttl_seconds,
+SELECT id, app_id, type, title, body, data, image_url, priority, ttl_seconds,
   collapse_key, sound, badge, deep_link, category, status, created_at, queued_at, completed_at
 FROM push_messages WHERE id = $1 AND app_id = $2
 `
@@ -121,7 +124,7 @@ WHERE id IN (
   LIMIT $1
   FOR UPDATE SKIP LOCKED
 )
-RETURNING id, app_id, title, body, data, image_url, priority, ttl_seconds,
+RETURNING id, app_id, type, title, body, data, image_url, priority, ttl_seconds,
   collapse_key, sound, badge, deep_link, category, status, created_at, queued_at, completed_at
 `
 	rows, err := r.db.Query(ctx, q, limit)
@@ -140,19 +143,45 @@ RETURNING id, app_id, title, body, data, image_url, priority, ttl_seconds,
 	return out, rows.Err()
 }
 
+// FindByIdempotencyKey returns an existing message_id for a prior Idempotency-Key.
+func (r *MessageRepository) FindByIdempotencyKey(ctx context.Context, appID, key string) (string, error) {
+	var messageID string
+	err := r.db.QueryRow(ctx, `
+SELECT message_id FROM idempotency_keys WHERE app_id = $1 AND idempotency_key = $2
+`, appID, key).Scan(&messageID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return messageID, err
+}
+
+func (r *MessageRepository) SaveIdempotencyKey(ctx context.Context, appID, key, messageID string) error {
+	_, err := r.db.Exec(ctx, `
+INSERT INTO idempotency_keys (idempotency_key, app_id, message_id, created_at)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (app_id, idempotency_key) DO NOTHING
+`, key, appID, messageID, time.Now().UTC())
+	return err
+}
+
 func scanMessage(row scannable) (*domain.Message, error) {
 	var m domain.Message
+	var msgType string
 	var title, body, imageURL, collapseKey, sound, deepLink, category *string
 	var dataJSON []byte
 	var ttlSeconds *int
 	var queuedAt, completedAt *time.Time
 	err := row.Scan(
-		&m.ID, &m.AppID, &title, &body, &dataJSON, &imageURL, &m.Priority, &ttlSeconds,
+		&m.ID, &m.AppID, &msgType, &title, &body, &dataJSON, &imageURL, &m.Priority, &ttlSeconds,
 		&collapseKey, &sound, &m.Badge, &deepLink, &category, &m.Status,
 		&m.CreatedAt, &queuedAt, &completedAt,
 	)
 	if err != nil {
 		return nil, err
+	}
+	m.Type = domain.MessageType(msgType)
+	if m.Type == "" {
+		m.Type = domain.MessageNotification
 	}
 	m.Title = deref(title)
 	m.Body = deref(body)

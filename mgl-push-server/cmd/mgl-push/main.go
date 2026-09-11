@@ -187,12 +187,15 @@ func registerProviders(ctx context.Context, cfg *config.Config, registry *provid
 		if err != nil {
 			logger.Error("apns provider init failed; falling back to noop", "error", err)
 			registry.Register(noop.New(domain.ProviderAPNs))
+			registry.Register(noop.New(domain.ProviderAPNsVoIP))
 		} else {
 			registry.Register(p)
+			registry.Register(provider.NewNamed(domain.ProviderAPNsVoIP, p))
 			logger.Info("apns provider registered", "production", cfg.APNsProduction)
 		}
 	} else {
 		registry.Register(noop.New(domain.ProviderAPNs))
+		registry.Register(noop.New(domain.ProviderAPNsVoIP))
 		logger.Warn("APNs credentials incomplete; apns uses noop")
 	}
 

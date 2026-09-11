@@ -1,0 +1,5 @@
+(ns mgl.push.notification
+  "Normal notification event helpers."
+  (:require [mgl.push.events :as e]))
+
+(def notification? e/notification?)

@@ -2,7 +2,12 @@
   "Thin ClojureDart wrapper around the mgl_push Flutter package.
    Do not re-implement providers here."
   (:require
-   ["package:mgl_push/mgl_push.dart" :as push]))
+   ["package:mgl_push/mgl_push.dart" :as push]
+   ["dart:async" :as async]))
+
+(def ^:private !client (atom nil))
+(def ^:private !handlers (atom #{}))
+(def ^:private !sub (atom nil))
 
 (defn- ->config
   "Build a Dart MglPushConfig from a Clojure map or pass through an existing one."
@@ -32,31 +37,106 @@
    - :app-id (required)
    - :register-on-initialize (optional, default true)"
   [config]
-  (push/createMglPush (->config config)))
+  (let [c (push/createMglPush (->config config))]
+    (reset! !client c)
+    c))
 
-(defn initialize [client]
-  (.initialize ^push/MglPush client))
+(defn- client!
+  ([] (or @!client (throw (ex-info "Call (push/create) or (push/init!) first" {}))))
+  ([c] c))
 
-(defn register [client]
-  (.register ^push/MglPush client))
+(defn init!
+  "Spec-style global init. Creates client from config and initializes."
+  ([config]
+   (let [c (create config)]
+     (.initialize ^push/MglPush c)
+     c))
+  ([]
+   (.initialize ^push/MglPush (client!))))
 
-(defn device [client]
-  (.getDevice ^push/MglPush client))
+(defn initialize
+  ([client] (.initialize ^push/MglPush client))
+  ([] (initialize (client!))))
 
-(defn unregister [client]
-  (.unregister ^push/MglPush client))
+(defn register!
+  ([client] (.register ^push/MglPush client))
+  ([] (register! (client!))))
 
-(defn set-user-id [client user-id]
-  (.setUserId ^push/MglPush client user-id))
+(defn register
+  ([client] (register! client))
+  ([] (register!)))
 
-(defn clear-user-id [client]
-  (.clearUserId ^push/MglPush client))
+(defn device
+  ([client] (.getDevice ^push/MglPush client))
+  ([] (device (client!))))
 
-(defn request-permission [client]
-  (.requestPermission ^push/MglPush client))
+(defn unregister!
+  ([client] (.unregister ^push/MglPush client))
+  ([] (unregister! (client!))))
 
-(defn messages [client]
-  (.-messages ^push/MglPush client))
+(defn unregister
+  ([client] (unregister! client))
+  ([] (unregister!)))
 
-(defn events [client]
-  (.-events ^push/MglPush client))
+(defn set-user-id!
+  ([client user-id] (.setUserId ^push/MglPush client user-id))
+  ([user-id] (set-user-id! (client!) user-id)))
+
+(defn set-user-id
+  ([client user-id] (set-user-id! client user-id))
+  ([user-id] (set-user-id! user-id)))
+
+(defn clear-user-id!
+  ([client] (.clearUserId ^push/MglPush client))
+  ([] (clear-user-id! (client!))))
+
+(defn clear-user-id
+  ([client] (clear-user-id! client))
+  ([] (clear-user-id!)))
+
+(defn request-permission!
+  ([client] (.requestPermission ^push/MglPush client))
+  ([] (request-permission! (client!))))
+
+(defn request-permission
+  ([client] (request-permission! client))
+  ([] (request-permission!)))
+
+(defn capabilities
+  "Returns PushCapabilities (spec §17)."
+  ([client] (.getCapabilities ^push/MglPush client))
+  ([] (capabilities (client!))))
+
+(defn messages
+  ([client] (.-messages ^push/MglPush client))
+  ([] (messages (client!))))
+
+(defn events
+  ([client] (.-events ^push/MglPush client))
+  ([] (events (client!))))
+
+(defn- ensure-handler-sub!
+  [client]
+  (when-not @!sub
+    (let [stream (.-events ^push/MglPush client)
+          sub (.listen stream
+                       (fn [event]
+                         (doseq [h @!handlers]
+                           (try (h event) (catch Error _)))))]
+      (reset! !sub sub))))
+
+(defn on-event
+  "Register a handler for all push events (spec §12). Returns the handler."
+  ([handler]
+   (on-event (client!) handler))
+  ([client handler]
+   (swap! !handlers conj handler)
+   (ensure-handler-sub! client)
+   handler))
+
+(defn remove-handler
+  ([handler]
+   (swap! !handlers disj handler)
+   nil)
+  ([_client handler]
+   (remove-handler handler)))

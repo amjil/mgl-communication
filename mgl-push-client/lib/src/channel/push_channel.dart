@@ -37,9 +37,20 @@ class PushChannel {
     return _buffer.stream;
   }
 
-  Stream<PushMessage> get messages => events
-      .where((e) => e is MessageEvent)
-      .map((e) => (e as MessageEvent).message);
+  Stream<PushMessage> get messages =>
+      events.where((e) => e is DomainPushEvent).cast<DomainPushEvent>().map((e) {
+        return PushMessage(
+          messageId: e.id,
+          provider: e.provider,
+          title: e.data['title'],
+          body: e.data['body'],
+          data: e.data,
+          deepLink: e.data['deep_link'],
+        );
+      });
+
+  /// Inject a parsed event (e.g. from consumePendingEvents / getInitialNotification).
+  void inject(PushEvent event) => _buffer.add(event);
 
   void _ensureListening() {
     if (_listening) return;

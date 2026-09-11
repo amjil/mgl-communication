@@ -20,6 +20,7 @@ class MglPushPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, EventChann
 
     private var activeProvider: PushProvider? = null
     private var initialNotification: Map<String, Any?>? = null
+    private var availableProviders: List<PushProvider> = emptyList()
 
     private val callback = object : ProviderCallback {
         override fun onTokenChanged(token: String) {
@@ -31,15 +32,7 @@ class MglPushPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, EventChann
         }
 
         override fun onMessage(message: ProviderMessage) {
-            emit(mapOf(
-                "type" to "message",
-                "message_id" to message.messageId,
-                "provider" to (activeProvider?.name() ?: "unknown"),
-                "title" to message.title,
-                "body" to message.body,
-                "data" to message.data,
-                "deep_link" to message.deepLink
-            ))
+            emit(toDomainEvent(message))
         }
 
         override fun onNotificationOpened(data: Map<String, String>) {
@@ -141,6 +134,27 @@ class MglPushPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, EventChann
                 initialNotification = null
                 result.success(n)
             }
+            "consumePendingEvents" -> {
+                val stored = PendingNativeStore.load(context)
+                PendingNativeStore.clear(context)
+                val all = mutableListOf<Map<String, Any?>>()
+                all.addAll(stored)
+                all.addAll(pendingEvents)
+                pendingEvents.clear()
+                result.success(all)
+            }
+            "getCapabilities" -> {
+                val names = availableProviders.map { it.name() }.ifEmpty {
+                    listOf(activeProvider?.name() ?: "fcm")
+                }
+                result.success(mapOf(
+                    "notification" to true,
+                    "silent_push" to true,
+                    "background_push" to true,
+                    "incoming_call_push" to true,
+                    "providers" to names
+                ))
+            }
             else -> result.notImplemented()
         }
     }
@@ -155,9 +169,8 @@ class MglPushPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, EventChann
             FcmProvider(ctx)
         )
         val detector = DefaultPushProviderDetector(ctx, candidates)
-        val available = detector.detect()
-        // Prefer first available vendor SDK (Huawei before FCM when HMS is present).
-        activeProvider = available.firstOrNull() ?: run {
+        availableProviders = detector.detect()
+        activeProvider = availableProviders.firstOrNull() ?: run {
             val fcm = FcmProvider(ctx)
             callback.onError("PROVIDER_FALLBACK", "No push provider available; FCM will try init")
             fcm
@@ -165,7 +178,15 @@ class MglPushPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, EventChann
         activeProvider?.initialize(callback)
     }
 
+    private fun toDomainEvent(message: ProviderMessage): Map<String, Any?> {
+        return PendingNativeStore.toDomainEventMap(
+            activeProvider?.name() ?: "unknown",
+            message
+        )
+    }
+
     private fun emit(event: Map<String, Any?>) {
+        PendingNativeStore.save(context, event)
         val sink = eventSink
         if (sink != null) {
             sink.success(event)
@@ -188,6 +209,8 @@ class MglPushPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, EventChann
         activity = binding.activity
         binding.activity.intent?.extras?.let { extras ->
             if (extras.containsKey("mgl_message_id") ||
+                extras.containsKey("mgl_event_id") ||
+                extras.containsKey("call_id") ||
                 extras.containsKey("google.message_id") ||
                 extras.containsKey("from")
             ) {

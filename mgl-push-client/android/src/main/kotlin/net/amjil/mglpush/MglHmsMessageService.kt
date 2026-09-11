@@ -5,6 +5,7 @@ import com.huawei.hms.push.RemoteMessage
 
 /**
  * Receives Huawei Push Kit messages and token refresh callbacks.
+ * Persists to [PendingNativeStore] when Flutter is not yet running.
  */
 class MglHmsMessageService : HmsMessageService() {
 
@@ -21,8 +22,9 @@ class MglHmsMessageService : HmsMessageService() {
 
         val n = message.notification
         HuaweiBridge.onMessage(
+            applicationContext,
             ProviderMessage(
-                messageId = data["mgl_message_id"] ?: message.messageId,
+                messageId = data["mgl_message_id"] ?: data["mgl_event_id"] ?: message.messageId,
                 title = n?.title ?: data["title"],
                 body = n?.body ?: data["body"],
                 data = data,

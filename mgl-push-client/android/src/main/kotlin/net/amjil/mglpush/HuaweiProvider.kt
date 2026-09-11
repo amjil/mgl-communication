@@ -10,7 +10,7 @@ import com.huawei.hms.api.HuaweiApiAvailability
 import com.huawei.hms.push.HmsMessaging
 
 /**
- * Huawei Push Kit provider (Phase 4).
+ * Huawei Push Kit provider (Phase 2).
  * Host app must ship agconnect-services.json and apply AGConnect/Huawei plugins.
  */
 class HuaweiProvider(private val context: Context) : PushProvider {
@@ -36,7 +36,7 @@ class HuaweiProvider(private val context: Context) : PushProvider {
 
     override fun initialize(callback: ProviderCallback) {
         this.callback = callback
-        HuaweiBridge.register(this)
+        HuaweiBridge.register(this, context)
         try {
             HmsMessaging.getInstance(context).isAutoInitEnabled = true
             Thread {
@@ -119,9 +119,11 @@ class HuaweiProvider(private val context: Context) : PushProvider {
 
 object HuaweiBridge {
     @Volatile private var provider: HuaweiProvider? = null
+    @Volatile private var appContext: Context? = null
 
-    fun register(p: HuaweiProvider) {
+    fun register(p: HuaweiProvider, context: Context) {
         provider = p
+        appContext = context.applicationContext
     }
 
     fun unregister(p: HuaweiProvider) {
@@ -133,6 +135,16 @@ object HuaweiBridge {
     }
 
     fun onMessage(message: ProviderMessage) {
-        provider?.onMessage(message)
+        onMessage(appContext, message)
+    }
+
+    fun onMessage(context: Context?, message: ProviderMessage) {
+        if (context != null) appContext = context.applicationContext
+        val p = provider
+        if (p != null) {
+            p.onMessage(message)
+        } else {
+            PendingNativeStore.saveProviderMessage(appContext, "huawei", message)
+        }
     }
 }

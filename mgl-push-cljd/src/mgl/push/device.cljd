@@ -1,0 +1,8 @@
+(ns mgl.push.device
+  "Device helpers."
+  (:require [mgl.push.core :as core]))
+
+(defn current
+  "Return current PushDevice or nil."
+  ([] (core/device))
+  ([client] (core/device client)))

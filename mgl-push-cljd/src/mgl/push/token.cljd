@@ -1,0 +1,6 @@
+(ns mgl.push.token
+  "Token lifecycle is handled by the Flutter plugin; this ns documents the contract."
+  (:require [mgl.push.events :as events]))
+
+(defn changed? [event]
+  (events/token-changed? event))

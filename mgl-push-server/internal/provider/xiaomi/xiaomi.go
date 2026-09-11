@@ -17,10 +17,10 @@ import (
 
 const defaultSendURL = "https://api.xmpush.xiaomi.com/v3/message/regid"
 
-// Config for MiPush HTTP API (registration_id path — Phase 5 priority).
+// Config for MiPush HTTP API (registration_id path — Phase 2).
 type Config struct {
 	AppSecret string
-	// Optional package name fallback when device.AppID is empty.
+	// Android package name for restricted_package_name (required unless device.AppID looks like a package).
 	PackageName string
 	SendURL     string // override for tests
 }
@@ -190,16 +190,17 @@ func mapResponse(status int, body []byte) *provider.SendResult {
 	}
 }
 
-func buildForm(message *domain.Message, device *domain.Device, fallbackPkg string) (url.Values, error) {
+func buildForm(message *domain.Message, device *domain.Device, configuredPkg string) (url.Values, error) {
 	form := url.Values{}
 	form.Set("registration_id", device.Token)
 
-	pkg := device.AppID
-	if pkg == "" {
-		pkg = fallbackPkg
+	// Prefer explicit Xiaomi package config; AppID is business id and may not be the Android package.
+	pkg := configuredPkg
+	if pkg == "" && looksLikeAndroidPackage(device.AppID) {
+		pkg = device.AppID
 	}
 	if pkg == "" {
-		return nil, fmt.Errorf("xiaomi: restricted_package_name (app_id) required")
+		return nil, fmt.Errorf("xiaomi: restricted_package_name required (set MGL_PUSH_XIAOMI_PACKAGE_NAME)")
 	}
 	form.Set("restricted_package_name", pkg)
 
@@ -209,6 +210,10 @@ func buildForm(message *domain.Message, device *domain.Device, fallbackPkg strin
 	}
 	if message.ID != "" {
 		data["mgl_message_id"] = message.ID
+		data["mgl_event_id"] = message.ID
+	}
+	if message.Type != "" {
+		data["mgl_event_type"] = string(message.Type)
 	}
 	if message.DeepLink != "" {
 		data["deep_link"] = message.DeepLink
@@ -219,7 +224,7 @@ func buildForm(message *domain.Message, device *domain.Device, fallbackPkg strin
 	}
 	form.Set("payload", string(payload))
 
-	hasNotification := message.Title != "" || message.Body != ""
+	hasNotification := !message.Type.IsDataOnly() && (message.Title != "" || message.Body != "")
 	if hasNotification {
 		form.Set("title", message.Title)
 		form.Set("description", message.Body)
@@ -235,21 +240,34 @@ func buildForm(message *domain.Message, device *domain.Device, fallbackPkg strin
 			form.Set("extra.channel_id", message.Category)
 		}
 	} else {
-		form.Set("pass_through", "1") // data-only
+		form.Set("pass_through", "1") // data-only / incoming-call
 	}
 
 	if message.TTL > 0 {
 		// Xiaomi expects milliseconds
 		form.Set("time_to_live", strconv.FormatInt(message.TTL.Milliseconds(), 10))
 	}
-	if message.CollapseKey != "" {
+	if message.CollapseKey != "" && !message.Type.IsCallRelated() {
 		form.Set("notify_id", hashNotifyID(message.CollapseKey))
 	}
-	if message.Priority == domain.PriorityHigh {
+	if message.Priority == domain.PriorityHigh || message.Type.IsCallRelated() {
 		form.Set("extra.cb", "1")
 	}
 
 	return form, nil
+}
+
+func looksLikeAndroidPackage(s string) bool {
+	if s == "" || !strings.Contains(s, ".") {
+		return false
+	}
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func hashNotifyID(s string) string {

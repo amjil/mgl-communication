@@ -1,15 +1,19 @@
 import Flutter
+import PushKit
 import UIKit
 import UserNotifications
 import ObjectiveC
 
-public class MglPushPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, UNUserNotificationCenterDelegate {
+public class MglPushPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, UNUserNotificationCenterDelegate, PKPushRegistryDelegate {
   private var methodChannel: FlutterMethodChannel?
   private var eventChannel: FlutterEventChannel?
   private var eventSink: FlutterEventSink?
   private var pendingEvents: [[String: Any?]] = []
   private var apnsProvider = ApnsProvider()
   private var initialNotification: [String: Any?]?
+  private var voipRegistry: PKPushRegistry?
+  private var voipToken: String?
+  private let pendingStore = PendingEventStore()
 
   public static func register(with registrar: FlutterPluginRegistrar) {
     let instance = MglPushPlugin()
@@ -34,18 +38,23 @@ public class MglPushPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, UNUse
       apnsProvider.initialize { [weak self] event in
         self?.emit(event)
       }
+      setupPushKit()
       result(nil)
     case "register":
+      // Prefer VoIP token for incoming-call capability when available; else APNs.
+      let token = apnsProvider.getToken() ?? ""
       result([
         "platform": "ios",
         "provider": "apns",
-        "token": apnsProvider.getToken() ?? ""
+        "token": token,
+        "voip_token": voipToken as Any
       ])
     case "getDevice":
       result([
         "platform": "ios",
         "provider": "apns",
-        "token": apnsProvider.getToken() ?? ""
+        "token": apnsProvider.getToken() ?? "",
+        "voip_token": voipToken as Any
       ])
     case "unregister":
       apnsProvider.unregister()
@@ -60,12 +69,74 @@ public class MglPushPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, UNUse
       let n = initialNotification
       initialNotification = nil
       result(n)
+    case "consumePendingEvents":
+      var all = pendingStore.consume()
+      all.append(contentsOf: pendingEvents)
+      pendingEvents.removeAll()
+      result(all)
+    case "getCapabilities":
+      var providers = ["apns"]
+      if voipToken != nil {
+        providers.append("apns_voip")
+      } else {
+        // Advertise capability even before token; server decides transport.
+        providers.append("apns_voip")
+      }
+      result([
+        "notification": true,
+        "silent_push": true,
+        "background_push": true,
+        "incoming_call_push": true,
+        "providers": providers
+      ])
     default:
       result(FlutterMethodNotImplemented)
     }
   }
 
+  private func setupPushKit() {
+    let registry = PKPushRegistry(queue: DispatchQueue.main)
+    registry.delegate = self
+    registry.desiredPushTypes = [.voIP]
+    voipRegistry = registry
+  }
+
+  // MARK: - PKPushRegistryDelegate
+
+  public func pushRegistry(_ registry: PKPushRegistry, didUpdate pushCredentials: PKPushCredentials, for type: PKPushType) {
+    guard type == .voIP else { return }
+    let token = pushCredentials.token.map { String(format: "%02x", $0) }.joined()
+    voipToken = token
+    emit([
+      "type": "token_changed",
+      "provider": "apns_voip",
+      "token": token
+    ])
+  }
+
+  public func pushRegistry(_ registry: PKPushRegistry, didInvalidatePushTokenFor type: PKPushType) {
+    if type == .voIP {
+      voipToken = nil
+    }
+  }
+
+  public func pushRegistry(
+    _ registry: PKPushRegistry,
+    didReceiveIncomingPushWith payload: PKPushPayload,
+    for type: PKPushType,
+    completion: @escaping () -> Void
+  ) {
+    guard type == .voIP else {
+      completion()
+      return
+    }
+    emit(domainEvent(from: payload.dictionaryPayload, defaultType: "incoming-call", provider: "apns_voip"))
+    // CallKit / LCK belongs to mgl-call — we only deliver the event.
+    completion()
+  }
+
   private func emit(_ event: [String: Any?]) {
+    pendingStore.save(event)
     if let sink = eventSink {
       sink(event)
     } else {
@@ -95,8 +166,7 @@ public class MglPushPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, UNUse
     willPresent notification: UNNotification,
     withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
   ) {
-    emit(messageEvent(from: notification.request.content.userInfo))
-    // Foreground: Flutter decides whether to show a local notification.
+    emit(domainEvent(from: notification.request.content.userInfo, defaultType: "notification", provider: "apns"))
     completionHandler([])
   }
 
@@ -116,7 +186,13 @@ public class MglPushPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, UNUse
     completionHandler()
   }
 
-  private func messageEvent(from userInfo: [AnyHashable: Any]) -> [String: Any?] {
+  /// Background / silent push (content-available).
+  @objc public func handleRemoteNotification(_ userInfo: [AnyHashable: Any], fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
+    emit(domainEvent(from: userInfo, defaultType: "silent", provider: "apns"))
+    completionHandler(.newData)
+  }
+
+  private func domainEvent(from userInfo: [AnyHashable: Any], defaultType: String, provider: String) -> [String: Any?] {
     let data = stringify(userInfo)
     let aps = userInfo["aps"] as? [String: Any]
     var title: String?
@@ -127,15 +203,33 @@ public class MglPushPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, UNUse
     } else if let alert = aps?["alert"] as? String {
       body = alert
     }
+    var mutable = data
+    if let title { mutable["title"] = title }
+    if let body { mutable["body"] = body }
+
+    let rawType = mutable["mgl_event_type"] ?? ""
+    let eventType = normalizeEventType(rawType.isEmpty ? defaultType : rawType)
+    let id = mutable["mgl_event_id"] ?? mutable["mgl_message_id"] ?? mutable["event_id"] ?? ""
+    let ts = Int64(mutable["mgl_timestamp"] ?? "") ?? Int64(Date().timeIntervalSince1970)
+
     return [
-      "type": "message",
-      "message_id": data["mgl_message_id"] ?? data["message_id"],
-      "provider": "apns",
-      "title": title,
-      "body": body,
-      "data": data,
-      "deep_link": data["deep_link"]
+      "version": 1,
+      "type": eventType,
+      "id": id,
+      "timestamp": ts,
+      "provider": provider,
+      "data": mutable
     ]
+  }
+
+  private func normalizeEventType(_ raw: String) -> String {
+    switch raw {
+    case "incoming_call", "incoming-call": return "incoming-call"
+    case "call_cancelled", "call-cancelled": return "call-cancelled"
+    case "call_ended", "call-ended": return "call-ended"
+    case "message": return "notification"
+    default: return raw.isEmpty ? "notification" : raw
+    }
   }
 
   private func stringify(_ userInfo: [AnyHashable: Any]) -> [String: String] {
@@ -149,12 +243,48 @@ public class MglPushPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, UNUse
   }
 }
 
+/// Short-lived pending queue for cold start (spec §38–39). TTL 30–120s.
+final class PendingEventStore {
+  private let key = "mgl_push.pending_events"
+  private let ttl: TimeInterval = 120
+
+  func save(_ event: [String: Any?]) {
+    guard let type = event["type"] as? String else { return }
+    let keep = ["incoming-call", "call-cancelled", "call-ended", "silent", "background", "notification"]
+    guard keep.contains(type) else { return }
+    var items = loadRaw()
+    let payload: [String: Any] = [
+      "received_at": Date().timeIntervalSince1970,
+      "event": event.compactMapValues { $0 }
+    ]
+    items.append(payload)
+    UserDefaults.standard.set(items, forKey: key)
+  }
+
+  func consume() -> [[String: Any?]] {
+    let now = Date().timeIntervalSince1970
+    let items = loadRaw()
+    UserDefaults.standard.removeObject(forKey: key)
+    return items.compactMap { item in
+      guard let receivedAt = item["received_at"] as? TimeInterval,
+            now - receivedAt <= ttl,
+            let event = item["event"] as? [String: Any] else { return nil }
+      return event.mapValues { $0 as Any? }
+    }
+  }
+
+  private func loadRaw() -> [[String: Any]] {
+    (UserDefaults.standard.array(forKey: key) as? [[String: Any]]) ?? []
+  }
+}
+
 // MARK: - AppDelegate swizzle
 
 enum AppDelegateSwizzler {
   private static var didSwizzle = false
   private static var originalDidRegister: IMP?
   private static var originalDidFail: IMP?
+  private static var originalDidReceiveRemote: IMP?
 
   static func swizzleIfNeeded() {
     guard !didSwizzle else { return }
@@ -167,6 +297,7 @@ enum AppDelegateSwizzler {
 
     let regSel = #selector(UIApplicationDelegate.application(_:didRegisterForRemoteNotificationsWithDeviceToken:))
     let failSel = #selector(UIApplicationDelegate.application(_:didFailToRegisterForRemoteNotificationsWithError:))
+    let remoteSel = #selector(UIApplicationDelegate.application(_:didReceiveRemoteNotification:fetchCompletionHandler:))
 
     let regBlock: @convention(block) (AnyObject, UIApplication, Data) -> Void = { target, app, token in
       MglPushBridge.setDeviceToken(token)
@@ -182,9 +313,17 @@ enum AppDelegateSwizzler {
         unsafeBitCast(imp, to: Fn.self)(target, failSel, app, error)
       }
     }
+    let remoteBlock: @convention(block) (AnyObject, UIApplication, [AnyHashable: Any], @escaping (UIBackgroundFetchResult) -> Void) -> Void = { target, app, userInfo, completion in
+      MglPushBridge.plugin?.handleRemoteNotification(userInfo, fetchCompletionHandler: completion)
+      if let imp = AppDelegateSwizzler.originalDidReceiveRemote {
+        typealias Fn = @convention(c) (AnyObject, Selector, UIApplication, [AnyHashable: Any], @escaping (UIBackgroundFetchResult) -> Void) -> Void
+        unsafeBitCast(imp, to: Fn.self)(target, remoteSel, app, userInfo, completion)
+      }
+    }
 
     replace(cls, selector: regSel, block: regBlock, store: &originalDidRegister)
     replace(cls, selector: failSel, block: failBlock, store: &originalDidFail)
+    replace(cls, selector: remoteSel, block: remoteBlock, store: &originalDidReceiveRemote)
   }
 
   private static func replace(_ cls: AnyClass, selector: Selector, block: Any, store: inout IMP?) {

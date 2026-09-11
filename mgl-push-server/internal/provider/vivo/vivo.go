@@ -201,11 +201,37 @@ func buildSendBody(message *domain.Message, regID string, pushMode int) ([]byte,
 	title := message.Title
 	content := message.Body
 	if title == "" && content == "" {
-		title = "Notification"
-		if t, ok := message.Data["type"]; ok {
-			content = t
-		} else {
-			content = " "
+		switch message.Type {
+		case domain.MessageIncomingCall:
+			title = "Incoming call"
+			if name, ok := message.Data["caller_display_name"]; ok && name != "" {
+				content = name
+			} else if id, ok := message.Data["caller_id"]; ok {
+				content = id
+			} else {
+				content = " "
+			}
+		case domain.MessageCallCancelled:
+			title = "Call cancelled"
+			content = message.Data["call_id"]
+			if content == "" {
+				content = " "
+			}
+		case domain.MessageCallEnded:
+			title = "Call ended"
+			content = message.Data["call_id"]
+			if content == "" {
+				content = " "
+			}
+		default:
+			title = "Notification"
+			if t, ok := message.Data["mgl_event_type"]; ok {
+				content = t
+			} else if t, ok := message.Data["type"]; ok {
+				content = t
+			} else {
+				content = " "
+			}
 		}
 	}
 
@@ -215,6 +241,10 @@ func buildSendBody(message *domain.Message, regID string, pushMode int) ([]byte,
 	}
 	if message.ID != "" {
 		custom["mgl_message_id"] = message.ID
+		custom["mgl_event_id"] = message.ID
+	}
+	if message.Type != "" {
+		custom["mgl_event_type"] = string(message.Type)
 	}
 	if message.DeepLink != "" {
 		custom["deep_link"] = message.DeepLink

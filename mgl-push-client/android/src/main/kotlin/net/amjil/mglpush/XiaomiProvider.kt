@@ -7,14 +7,14 @@ import android.util.Log
 import java.lang.reflect.Method
 
 /**
- * Xiaomi MiPush provider (Phase 5).
+ * Xiaomi MiPush provider (Phase 2).
  *
  * Host app must:
  * 1. Add MiPush Android SDK (AAR/JAR from Xiaomi console) to the app
  * 2. Declare meta-data XIAOMI_APP_ID / XIAOMI_APP_KEY
  * 3. Register a PushMessageReceiver that forwards to [XiaomiBridge]
  *
- * See docs/CLIENT.md and MglMiPushReceiver.example.kt
+ * See docs/CLIENT.md and android/examples/AppMiPushReceiver.kt
  */
 class XiaomiProvider(private val context: Context) : PushProvider {
     private var callback: ProviderCallback? = null
@@ -35,7 +35,7 @@ class XiaomiProvider(private val context: Context) : PushProvider {
 
     override fun initialize(callback: ProviderCallback) {
         this.callback = callback
-        XiaomiBridge.register(this)
+        XiaomiBridge.register(this, context)
         try {
             val appId = meta(META_APP_ID)
             val appKey = meta(META_APP_KEY)
@@ -143,9 +143,15 @@ class XiaomiProvider(private val context: Context) : PushProvider {
 
 object XiaomiBridge {
     @Volatile private var provider: XiaomiProvider? = null
+    @Volatile private var appContext: android.content.Context? = null
 
     fun register(p: XiaomiProvider) {
         provider = p
+    }
+
+    fun register(p: XiaomiProvider, context: android.content.Context) {
+        provider = p
+        appContext = context.applicationContext
     }
 
     fun unregister(p: XiaomiProvider) {
@@ -159,15 +165,25 @@ object XiaomiBridge {
     }
 
     fun onPassThrough(title: String?, content: String?, extra: Map<String, String>) {
-        provider?.onMessage(
+        deliver(
             ProviderMessage(
-                messageId = extra["mgl_message_id"],
+                messageId = extra["mgl_message_id"] ?: extra["mgl_event_id"],
                 title = title,
                 body = content,
                 data = extra,
                 deepLink = extra["deep_link"]
             )
         )
+    }
+
+    fun onPassThrough(
+        context: android.content.Context?,
+        title: String?,
+        content: String?,
+        extra: Map<String, String>
+    ) {
+        if (context != null) appContext = context.applicationContext
+        onPassThrough(title, content, extra)
     }
 
     fun onNotificationClicked(title: String?, description: String?, extra: Map<String, String>) {
@@ -178,9 +194,9 @@ object XiaomiBridge {
     }
 
     fun onNotificationArrived(title: String?, description: String?, extra: Map<String, String>) {
-        provider?.onMessage(
+        deliver(
             ProviderMessage(
-                messageId = extra["mgl_message_id"],
+                messageId = extra["mgl_message_id"] ?: extra["mgl_event_id"],
                 title = title,
                 body = description,
                 data = extra,
@@ -189,7 +205,26 @@ object XiaomiBridge {
         )
     }
 
+    fun onNotificationArrived(
+        context: android.content.Context?,
+        title: String?,
+        description: String?,
+        extra: Map<String, String>
+    ) {
+        if (context != null) appContext = context.applicationContext
+        onNotificationArrived(title, description, extra)
+    }
+
     fun onError(code: String, message: String) {
         provider?.onError(code, message)
+    }
+
+    private fun deliver(message: ProviderMessage) {
+        val p = provider
+        if (p != null) {
+            p.onMessage(message)
+        } else {
+            PendingNativeStore.saveProviderMessage(appContext, "xiaomi", message)
+        }
     }
 }

@@ -10,8 +10,9 @@ const (
 	ProviderXiaomi = "xiaomi"
 	ProviderOppo   = "oppo"
 	ProviderVivo   = "vivo"
-	ProviderFCM    = "fcm"
-	ProviderAPNs   = "apns"
+	ProviderFCM      = "fcm"
+	ProviderAPNs     = "apns"
+	ProviderAPNsVoIP = "apns_voip"
 
 	DeviceStatusActive   = "active"
 	DeviceStatusInvalid  = "invalid"

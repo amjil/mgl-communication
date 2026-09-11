@@ -51,4 +51,14 @@ var (
 		Name: "push_invalid_tokens_total",
 		Help: "Invalid tokens detected",
 	}, []string{"provider", "app_id"})
+
+	IncomingCallPushTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "incoming_call_push_total",
+		Help: "Incoming call push messages created",
+	}, []string{"app_id"})
+
+	IncomingCallPushFailureTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "incoming_call_push_failure_total",
+		Help: "Incoming call push failures",
+	}, []string{"app_id", "provider"})
 )

@@ -46,6 +46,34 @@ func TestBuildRequestBody(t *testing.T) {
 	}
 }
 
+func TestBuildRequestBodyDataOnlyHighPriority(t *testing.T) {
+	b, err := buildRequestBody(&domain.Message{
+		ID:       "01CALL",
+		Type:     domain.MessageIncomingCall,
+		Priority: domain.PriorityHigh,
+		TTL:      30 * time.Second,
+		Data:     map[string]string{"call_id": "c1"},
+	}, "tok-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(b, &root); err != nil {
+		t.Fatal(err)
+	}
+	msg := root["message"].(map[string]any)
+	if _, ok := msg["notification"]; ok {
+		t.Fatal("incoming_call must be data-only")
+	}
+	android := msg["android"].(map[string]any)
+	if android["urgency"] != "HIGH" {
+		t.Fatalf("urgency=%v", android["urgency"])
+	}
+	if android["ttl"] != "30s" {
+		t.Fatalf("ttl=%v", android["ttl"])
+	}
+}
+
 func TestMapPushResponse(t *testing.T) {
 	res := mapPushResponse(200, []byte(`{"code":"80000000","msg":"Success","requestId":"r1"}`))
 	if !res.Accepted || res.ProviderMessageID != "r1" {

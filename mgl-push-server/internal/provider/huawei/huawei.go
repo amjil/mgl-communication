@@ -202,6 +202,10 @@ func buildRequestBody(message *domain.Message, deviceToken string) ([]byte, erro
 	}
 	if message.ID != "" {
 		dataMap["mgl_message_id"] = message.ID
+		dataMap["mgl_event_id"] = message.ID
+	}
+	if message.Type != "" {
+		dataMap["mgl_event_type"] = string(message.Type)
 	}
 	if message.DeepLink != "" {
 		dataMap["deep_link"] = message.DeepLink
@@ -216,7 +220,19 @@ func buildRequestBody(message *domain.Message, deviceToken string) ([]byte, erro
 		"data":  string(dataJSON),
 	}
 
-	hasNotification := message.Title != "" || message.Body != ""
+	android := map[string]any{}
+	if message.TTL > 0 {
+		android["ttl"] = fmt.Sprintf("%ds", int(message.TTL.Seconds()))
+	}
+	// Incoming call / high priority must set urgency even for data-only (Phase 2).
+	if message.Priority == domain.PriorityHigh || message.Type.IsCallRelated() {
+		android["urgency"] = "HIGH"
+	}
+	if message.CollapseKey != "" && !message.Type.IsCallRelated() {
+		android["bi_tag"] = message.CollapseKey
+	}
+
+	hasNotification := !message.Type.IsDataOnly() && (message.Title != "" || message.Body != "")
 	if hasNotification {
 		msg["notification"] = map[string]any{
 			"title": message.Title,
@@ -246,19 +262,10 @@ func buildRequestBody(message *domain.Message, deviceToken string) ([]byte, erro
 				"intent": message.DeepLink,
 			}
 		}
-		android := map[string]any{
-			"notification": androidN,
-		}
-		if message.TTL > 0 {
-			android["ttl"] = fmt.Sprintf("%ds", int(message.TTL.Seconds()))
-		}
-		if message.CollapseKey != "" {
-			android["collapse_key"] = -1 // Huawei uses int; keep default when custom unsupported
-			android["bi_tag"] = message.CollapseKey
-		}
-		if message.Priority == domain.PriorityHigh {
-			android["urgency"] = "HIGH"
-		}
+		android["notification"] = androidN
+	}
+
+	if len(android) > 0 {
 		msg["android"] = android
 	}
 

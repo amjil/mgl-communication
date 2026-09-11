@@ -37,7 +37,7 @@ class FcmProvider(private val context: Context) : PushProvider {
 
     override fun initialize(callback: ProviderCallback) {
         this.callback = callback
-        FcmBridge.register(this)
+        FcmBridge.register(this, context)
         try {
             FirebaseMessaging.getInstance().token
                 .addOnSuccessListener { t ->
@@ -118,12 +118,17 @@ class FcmProvider(private val context: Context) : PushProvider {
     }
 }
 
-/** Forwards FCM service callbacks to the active provider instance. */
 object FcmBridge {
     @Volatile private var provider: FcmProvider? = null
+    @Volatile private var appContext: android.content.Context? = null
 
     fun register(p: FcmProvider) {
         provider = p
+    }
+
+    fun register(p: FcmProvider, context: android.content.Context) {
+        provider = p
+        appContext = context.applicationContext
     }
 
     fun unregister(p: FcmProvider) {
@@ -135,6 +140,16 @@ object FcmBridge {
     }
 
     fun onMessage(message: ProviderMessage) {
-        provider?.onMessage(message)
+        onMessage(appContext, message)
+    }
+
+    fun onMessage(context: android.content.Context?, message: ProviderMessage) {
+        if (context != null) appContext = context.applicationContext
+        val p = provider
+        if (p != null) {
+            p.onMessage(message)
+        } else {
+            PendingNativeStore.saveProviderMessage(appContext, "fcm", message)
+        }
     }
 }

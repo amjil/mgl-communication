@@ -1,13 +1,42 @@
 (ns mgl.push.events
-  "Push event helpers for ClojureDart apps."
+  "Push event helpers for ClojureDart apps (spec §24)."
   (:require
    ["package:mgl_push/mgl_push.dart" :as push]))
 
 (defn token-changed? [event]
   (dart/is? event push/TokenChangedEvent))
 
-(defn message? [event]
-  (dart/is? event push/MessageEvent))
+(defn domain? [event]
+  (dart/is? event push/DomainPushEvent))
+
+(defn message?
+  "True for domain notification events."
+  [event]
+  (notification? event))
+
+(defn notification? [event]
+  (and (domain? event)
+       (.-isNotification ^push/DomainPushEvent event)))
+
+(defn silent? [event]
+  (and (domain? event)
+       (.-isSilent ^push/DomainPushEvent event)))
+
+(defn background? [event]
+  (and (domain? event)
+       (.-isBackground ^push/DomainPushEvent event)))
+
+(defn incoming-call? [event]
+  (and (domain? event)
+       (.-isIncomingCall ^push/DomainPushEvent event)))
+
+(defn call-cancelled? [event]
+  (and (domain? event)
+       (.-isCallCancelled ^push/DomainPushEvent event)))
+
+(defn call-ended? [event]
+  (and (domain? event)
+       (.-isCallEnded ^push/DomainPushEvent event)))
 
 (defn notification-open? [event]
   (dart/is? event push/NotificationOpenEvent))
@@ -15,5 +44,35 @@
 (defn error? [event]
   (dart/is? event push/ErrorEvent))
 
-(defn type [event]
-  (.-type ^push/PushEvent event))
+(defn type
+  "Returns event type string. For DomainPushEvent uses domain type."
+  [event]
+  (cond
+    (domain? event) (.-type ^push/DomainPushEvent event)
+    (token-changed? event) "token_changed"
+    (notification-open? event) "notification_open"
+    (error? event) "error"
+    :else nil))
+
+(defn event-id [event]
+  (when (domain? event)
+    (.-id ^push/DomainPushEvent event)))
+
+(defn event-data [event]
+  (when (domain? event)
+    (.-data ^push/DomainPushEvent event)))
+
+(defn call-id [event]
+  (when (domain? event)
+    (.-callId ^push/DomainPushEvent event)))
+
+(defn ->map
+  "Convert a DomainPushEvent to a Clojure map matching the public contract."
+  [event]
+  (when (domain? event)
+    (let [e ^push/DomainPushEvent event]
+      {:version (.-version e)
+       :id (.-id e)
+       :type (keyword (.-type e))
+       :timestamp (.-timestamp e)
+       :data (into {} (.-data e))})))

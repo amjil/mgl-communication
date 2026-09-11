@@ -19,8 +19,10 @@ class MglFirebaseMessagingService : FirebaseMessagingService() {
 
         val n = message.notification
         FcmBridge.onMessage(
+            applicationContext,
             ProviderMessage(
                 messageId = data["mgl_message_id"]
+                    ?: data["mgl_event_id"]
                     ?: message.messageId
                     ?: data["google.message_id"],
                 title = n?.title ?: data["title"],

@@ -1,22 +1,42 @@
 (ns mgl.push.api
-  "Re-exports core API for convenience."
+  "Re-exports core API for convenience (spec §12)."
   (:require
    [mgl.push.core :as core]
    [mgl.push.events :as events]))
 
 (def create core/create)
+(def init! core/init!)
 (def initialize core/initialize)
+(def register! core/register!)
 (def register core/register)
 (def device core/device)
+(def unregister! core/unregister!)
 (def unregister core/unregister)
+(def set-user-id! core/set-user-id!)
 (def set-user-id core/set-user-id)
+(def clear-user-id! core/clear-user-id!)
 (def clear-user-id core/clear-user-id)
+(def request-permission! core/request-permission!)
 (def request-permission core/request-permission)
+(def capabilities core/capabilities)
 (def messages core/messages)
 (def events-stream core/events)
+(def on-event core/on-event)
+(def remove-handler core/remove-handler)
 
 (def token-changed? events/token-changed?)
+(def domain? events/domain?)
 (def message? events/message?)
+(def notification? events/notification?)
+(def silent? events/silent?)
+(def background? events/background?)
+(def incoming-call? events/incoming-call?)
+(def call-cancelled? events/call-cancelled?)
+(def call-ended? events/call-ended?)
 (def notification-open? events/notification-open?)
 (def error? events/error?)
 (def event-type events/type)
+(def event-id events/event-id)
+(def event-data events/event-data)
+(def call-id events/call-id)
+(def ->map events/->map)

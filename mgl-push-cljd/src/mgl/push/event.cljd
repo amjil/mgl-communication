@@ -1,0 +1,16 @@
+(ns mgl.push.event
+  "Re-export event helpers under mgl.push.event (spec layout)."
+  (:require [mgl.push.events :as e]))
+
+(def domain? e/domain?)
+(def notification? e/notification?)
+(def silent? e/silent?)
+(def background? e/background?)
+(def incoming-call? e/incoming-call?)
+(def call-cancelled? e/call-cancelled?)
+(def call-ended? e/call-ended?)
+(def type e/type)
+(def event-id e/event-id)
+(def event-data e/event-data)
+(def call-id e/call-id)
+(def ->map e/->map)

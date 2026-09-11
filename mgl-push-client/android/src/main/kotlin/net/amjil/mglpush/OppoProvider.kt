@@ -9,7 +9,7 @@ import android.util.Log
 import java.lang.reflect.Proxy
 
 /**
- * OPPO / HeyTap Push provider (Phase 6).
+ * OPPO / HeyTap Push provider (Phase 3).
  *
  * Host app must add HeyTap/OPPO Push SDK and meta-data:
  * - OPPO_APP_KEY
@@ -37,7 +37,7 @@ class OppoProvider(private val context: Context) : PushProvider {
 
     override fun initialize(callback: ProviderCallback) {
         this.callback = callback
-        OppoBridge.register(this)
+        OppoBridge.register(this, context)
         try {
             val appKey = meta(META_APP_KEY)
             val appSecret = meta(META_APP_SECRET)
@@ -220,9 +220,15 @@ class OppoProvider(private val context: Context) : PushProvider {
 
 object OppoBridge {
     @Volatile private var provider: OppoProvider? = null
+    @Volatile private var appContext: android.content.Context? = null
 
     fun register(p: OppoProvider) {
         provider = p
+    }
+
+    fun register(p: OppoProvider, context: android.content.Context) {
+        provider = p
+        appContext = context.applicationContext
     }
 
     fun unregister(p: OppoProvider) {
@@ -234,15 +240,29 @@ object OppoBridge {
     }
 
     fun onMessage(title: String?, body: String?, extra: Map<String, String>) {
-        provider?.onMessage(
-            ProviderMessage(
-                messageId = extra["mgl_message_id"],
-                title = title,
-                body = body,
-                data = extra,
-                deepLink = extra["deep_link"]
-            )
+        onMessage(appContext, title, body, extra)
+    }
+
+    fun onMessage(
+        context: android.content.Context?,
+        title: String?,
+        body: String?,
+        extra: Map<String, String>
+    ) {
+        if (context != null) appContext = context.applicationContext
+        val message = ProviderMessage(
+            messageId = extra["mgl_message_id"] ?: extra["mgl_event_id"],
+            title = title,
+            body = body,
+            data = extra,
+            deepLink = extra["deep_link"]
         )
+        val p = provider
+        if (p != null) {
+            p.onMessage(message)
+        } else {
+            PendingNativeStore.saveProviderMessage(appContext, "oppo", message)
+        }
     }
 
     fun onNotificationOpened(extra: Map<String, String>) {

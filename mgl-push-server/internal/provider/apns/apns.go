@@ -140,9 +140,19 @@ func (p *Provider) Send(ctx context.Context, message *domain.Message, device *do
 		return nil, err
 	}
 	req.Header.Set("authorization", "bearer "+token)
-	req.Header.Set("apns-topic", p.cfg.BundleID)
-	req.Header.Set("apns-push-type", pushType(message))
-	req.Header.Set("apns-priority", apnsPriority(message.Priority))
+	topic := p.cfg.BundleID
+	pt := pushType(message)
+	if device.Provider == domain.ProviderAPNsVoIP {
+		topic = p.cfg.BundleID + ".voip"
+		pt = "voip"
+	}
+	req.Header.Set("apns-topic", topic)
+	req.Header.Set("apns-push-type", pt)
+	priority := apnsPriority(message.Priority)
+	if message.Type == domain.MessageIncomingCall {
+		priority = "10"
+	}
+	req.Header.Set("apns-priority", priority)
 	if message.CollapseKey != "" {
 		req.Header.Set("apns-collapse-id", truncate(message.CollapseKey, 64))
 	}
@@ -240,7 +250,9 @@ func mapAPNsError(status int, body []byte) *provider.SendResult {
 
 func buildPayload(message *domain.Message) ([]byte, error) {
 	aps := map[string]any{}
-	if message.Title != "" || message.Body != "" {
+	dataOnly := message.Type.IsDataOnly() || (message.Title == "" && message.Body == "")
+
+	if !dataOnly && (message.Title != "" || message.Body != "") {
 		alert := map[string]string{}
 		if message.Title != "" {
 			alert["title"] = message.Title
@@ -261,8 +273,7 @@ func buildPayload(message *domain.Message) ([]byte, error) {
 	if message.Category != "" {
 		aps["category"] = message.Category
 	}
-	// content-available for data-only background
-	if message.Title == "" && message.Body == "" && len(message.Data) > 0 {
+	if dataOnly {
 		aps["content-available"] = 1
 	}
 
@@ -275,6 +286,10 @@ func buildPayload(message *domain.Message) ([]byte, error) {
 	}
 	if message.ID != "" {
 		payload["mgl_message_id"] = message.ID
+		payload["mgl_event_id"] = message.ID
+	}
+	if message.Type != "" {
+		payload["mgl_event_type"] = string(message.Type)
 	}
 	if message.DeepLink != "" {
 		payload["deep_link"] = message.DeepLink
@@ -286,10 +301,18 @@ func buildPayload(message *domain.Message) ([]byte, error) {
 }
 
 func pushType(message *domain.Message) string {
-	if message.Title != "" || message.Body != "" {
-		return "alert"
+	switch message.Type {
+	case domain.MessageIncomingCall:
+		// VoIP push-type is set separately when provider is apns_voip.
+		return "background"
+	case domain.MessageSilent, domain.MessageBackground, domain.MessageCallCancelled, domain.MessageCallEnded:
+		return "background"
+	default:
+		if message.Title != "" || message.Body != "" {
+			return "alert"
+		}
+		return "background"
 	}
-	return "background"
 }
 
 func apnsPriority(p string) string {

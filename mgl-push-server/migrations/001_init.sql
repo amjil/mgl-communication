@@ -27,6 +27,7 @@ CREATE INDEX IF NOT EXISTS idx_devices_app_user ON devices (app_id, user_id) WHE
 CREATE TABLE IF NOT EXISTS push_messages (
     id VARCHAR(26) PRIMARY KEY,
     app_id VARCHAR(255) NOT NULL,
+    type VARCHAR(32) NOT NULL DEFAULT 'notification',
     title TEXT,
     body TEXT,
     data JSONB,
@@ -46,6 +47,7 @@ CREATE TABLE IF NOT EXISTS push_messages (
 
 CREATE INDEX IF NOT EXISTS idx_push_messages_status ON push_messages (status);
 CREATE INDEX IF NOT EXISTS idx_push_messages_app_id ON push_messages (app_id);
+CREATE INDEX IF NOT EXISTS idx_push_messages_type ON push_messages (type);
 
 CREATE TABLE IF NOT EXISTS push_deliveries (
     id VARCHAR(26) PRIMARY KEY,
@@ -59,6 +61,8 @@ CREATE TABLE IF NOT EXISTS push_deliveries (
     attempts INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL,
     sent_at TIMESTAMPTZ,
+    accepted_at TIMESTAMPTZ,
+    failed_at TIMESTAMPTZ,
     delivered_at TIMESTAMPTZ,
     opened_at TIMESTAMPTZ,
     next_retry_at TIMESTAMPTZ
@@ -67,3 +71,13 @@ CREATE TABLE IF NOT EXISTS push_deliveries (
 CREATE INDEX IF NOT EXISTS idx_push_deliveries_message_id ON push_deliveries (message_id);
 CREATE INDEX IF NOT EXISTS idx_push_deliveries_status ON push_deliveries (status);
 CREATE INDEX IF NOT EXISTS idx_push_deliveries_ready ON push_deliveries (status, next_retry_at);
+
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+    idempotency_key VARCHAR(255) NOT NULL,
+    app_id          VARCHAR(255) NOT NULL,
+    message_id      VARCHAR(26)  NOT NULL REFERENCES push_messages (id),
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (app_id, idempotency_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_idempotency_created ON idempotency_keys (created_at);

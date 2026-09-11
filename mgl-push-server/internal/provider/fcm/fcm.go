@@ -91,26 +91,37 @@ func buildMessage(message *domain.Message, device *domain.Device) *messaging.Mes
 	}
 	if message.ID != "" {
 		data["mgl_message_id"] = message.ID
+		data["mgl_event_id"] = message.ID
+	}
+	if message.Type != "" {
+		data["mgl_event_type"] = string(message.Type)
 	}
 	if message.DeepLink != "" {
 		data["deep_link"] = message.DeepLink
+	}
+
+	priority := androidPriority(message.Priority)
+	if message.Type.IsCallRelated() {
+		priority = "high"
 	}
 
 	out := &messaging.Message{
 		Token: device.Token,
 		Data:  data,
 		Android: &messaging.AndroidConfig{
-			Priority: androidPriority(message.Priority),
+			Priority: priority,
 		},
 	}
 	if message.TTL > 0 {
 		out.Android.TTL = &message.TTL
 	}
-	if message.CollapseKey != "" {
+	// Incoming call must not use collapse_key (spec §118).
+	if message.CollapseKey != "" && !message.Type.IsCallRelated() {
 		out.Android.CollapseKey = message.CollapseKey
 	}
 
-	hasNotification := message.Title != "" || message.Body != "" || message.ImageURL != ""
+	hasNotification := !message.Type.IsDataOnly() &&
+		(message.Title != "" || message.Body != "" || message.ImageURL != "")
 	if hasNotification {
 		out.Notification = &messaging.Notification{
 			Title:    message.Title,
@@ -118,9 +129,9 @@ func buildMessage(message *domain.Message, device *domain.Device) *messaging.Mes
 			ImageURL: message.ImageURL,
 		}
 		androidN := &messaging.AndroidNotification{
-			Title: message.Title,
-			Body:  message.Body,
-			Sound: message.Sound,
+			Title:    message.Title,
+			Body:     message.Body,
+			Sound:    message.Sound,
 			ImageURL: message.ImageURL,
 		}
 		if message.DeepLink != "" {

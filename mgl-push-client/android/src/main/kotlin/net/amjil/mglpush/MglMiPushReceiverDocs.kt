@@ -1,38 +1,15 @@
-package net.amjil.mglpush
-
 /**
- * Example MiPush PushMessageReceiver for host apps.
+ * Example MiPush PushMessageReceiver for host apps (Phase 2).
  *
- * Copy into your app module (must extend com.xiaomi.mipush.sdk.PushMessageReceiver),
- * register in AndroidManifest, and keep this forwarding logic.
+ * Full copy-paste sample: `android/examples/AppMiPushReceiver.kt`
  *
- * This file is documentation-only and is NOT compiled into the plugin
- * (SDK JAR is provided by the host app).
+ * Host app must:
+ * 1. Add MiPush Android SDK (AAR from Xiaomi console)
+ * 2. Declare meta-data `XIAOMI_APP_ID` / `XIAOMI_APP_KEY`
+ * 3. Register a `PushMessageReceiver` that forwards to [XiaomiBridge]
  *
- * ```kotlin
- * package your.app
- *
- * import android.content.Context
- * import com.xiaomi.mipush.sdk.*
- * import net.amjil.mglpush.XiaomiBridge
- *
- * class AppMiPushReceiver : PushMessageReceiver() {
- *   override fun onReceiveRegisterResult(context: Context, message: MiPushCommandMessage) {
- *     if (message.command == MiPushClient.COMMAND_REGISTER && message.resultCode == ErrorCode.SUCCESS.toLong()) {
- *       XiaomiBridge.onRegister(message.commandArguments?.firstOrNull())
- *     }
- *   }
- *   override fun onReceivePassThroughMessage(context: Context, message: MiPushMessage) {
- *     XiaomiBridge.onPassThrough(message.title, message.content, message.extra ?: emptyMap())
- *   }
- *   override fun onNotificationMessageClicked(context: Context, message: MiPushMessage) {
- *     XiaomiBridge.onNotificationClicked(message.title, message.description, message.extra ?: emptyMap())
- *   }
- *   override fun onNotificationMessageArrived(context: Context, message: MiPushMessage) {
- *     XiaomiBridge.onNotificationArrived(message.title, message.description, message.extra ?: emptyMap())
- *   }
- * }
- * ```
+ * When Flutter is not yet running, [XiaomiBridge] writes to [PendingNativeStore]
+ * so cold-start incoming-call / silent events are not lost.
  */
 @Suppress("unused")
 object MglMiPushReceiverDocs

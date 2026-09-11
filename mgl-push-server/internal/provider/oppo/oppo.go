@@ -207,12 +207,38 @@ func buildMessageJSON(message *domain.Message, regID string) ([]byte, error) {
 	title := message.Title
 	body := message.Body
 	if title == "" && body == "" {
-		// OPPO unicast notification API requires notification; synthesize from data type.
-		title = "Notification"
-		if t, ok := message.Data["type"]; ok {
-			body = t
-		} else {
-			body = " "
+		// OPPO unicast API requires a notification shell; keep payload in action_parameters.
+		switch message.Type {
+		case domain.MessageIncomingCall:
+			title = "Incoming call"
+			if name, ok := message.Data["caller_display_name"]; ok && name != "" {
+				body = name
+			} else if id, ok := message.Data["caller_id"]; ok {
+				body = id
+			} else {
+				body = " "
+			}
+		case domain.MessageCallCancelled:
+			title = "Call cancelled"
+			body = message.Data["call_id"]
+			if body == "" {
+				body = " "
+			}
+		case domain.MessageCallEnded:
+			title = "Call ended"
+			body = message.Data["call_id"]
+			if body == "" {
+				body = " "
+			}
+		default:
+			title = "Notification"
+			if t, ok := message.Data["mgl_event_type"]; ok {
+				body = t
+			} else if t, ok := message.Data["type"]; ok {
+				body = t
+			} else {
+				body = " "
+			}
 		}
 	}
 
@@ -261,6 +287,10 @@ func buildMessageJSON(message *domain.Message, regID string) ([]byte, error) {
 	}
 	if message.ID != "" {
 		data["mgl_message_id"] = message.ID
+		data["mgl_event_id"] = message.ID
+	}
+	if message.Type != "" {
+		data["mgl_event_type"] = string(message.Type)
 	}
 	if message.DeepLink != "" {
 		data["deep_link"] = message.DeepLink

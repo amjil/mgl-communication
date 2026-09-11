@@ -2,102 +2,132 @@
 
 ## Flutter
 
+Depend on `mgl-push-client` (pubspec path / git).
+
 ```dart
 final push = createMglPush(MglPushConfig(
   serverUrl: 'https://push.example.com',
   serviceToken: 'your-service-token',
   appId: 'net.amjil.nomio',
+  registerOnInitialize: true, // default
 ));
 
-await push.initialize(); // failures must not block app startup
+final device = await push.initialize(); // must not crash app startup on failure
 await push.requestPermission();
-final device = await push.register();
+final caps = await push.getCapabilities();
 
-push.events.listen((e) { /* token_changed / notification_open / error */ });
-push.messages.listen((m) { /* foreground data */ });
+push.events.listen((e) {
+  switch (e) {
+    case DomainPushEvent(:final type, :final data) when e.isIncomingCall:
+      // → mgl-call
+      break;
+    case DomainPushEvent() when e.isCallCancelled:
+      break;
+    case TokenChangedEvent(:final provider, :final token):
+      break;
+    case NotificationOpenEvent():
+      break;
+    case ErrorEvent():
+      break;
+    default:
+      break;
+  }
+});
 
 await push.setUserId('user_123');
 await push.clearUserId();
+await push.unregister();
 ```
 
-Channels:
+### Channels
 
-- Methods: `net.amjil.mgl_push/methods`
-- Events: `net.amjil.mgl_push/events`
+| Channel | Name |
+|---------|------|
+| Methods | `net.amjil.mgl_push/methods` |
+| Events | `net.amjil.mgl_push/events` |
+
+Common methods: `initialize` · `register` · `getDevice` · `getCapabilities` · `consumePendingEvents` · `getInitialNotification` · `requestPermission` · `setUserId` · `clearUserId` · `unregister`
+
+### Domain events
+
+| Wire `type` | Dart |
+|-------------|------|
+| `notification` / `silent` / `background` / `incoming-call` / … | `DomainPushEvent` |
+| `token_changed` | `TokenChangedEvent` |
+| `notification_open` | `NotificationOpenEvent` |
+| `error` | `ErrorEvent` |
+
+Dedupe: `EventDeduper` (`event_id` + incoming-call `call_id`).  
+Expiry: drop incoming-call events whose `expires_at` has passed.
+
+Cold start: `initialize` calls `consumePendingEvents` and injects results into the event stream.
 
 ## ClojureDart
 
-See `mgl-push-cljd/` (includes `deps.edn`). It only wraps the Flutter API and does not reimplement providers.
+See [`mgl-push-cljd/README.md`](../mgl-push-cljd/README.md). The host must depend on both the Flutter plugin and the CLJD package.
 
 ```clojure
-(ns your.app.main
-  (:require [mgl.push.api :as push]))
+(require '[mgl.push.api :as push])
 
-(def client
-  (push/create
-   {:server-url "https://push.example.com"
-    :service-token "your-service-token"
-    :app-id "net.amjil.nomio"}))
-
-(await (push/initialize client))
-(await (push/request-permission client))
-(def device (await (push/register client)))
-
-(.listen (push/events-stream client)
-         (fn [e]
-           (cond
-             (push/token-changed? e) ...
-             (push/message? e) ...
-             (push/notification-open? e) ...
-             (push/error? e) ...)))
+(push/init! {:server-url "…" :service-token "…" :app-id "net.amjil.nomio"})
+(push/capabilities)
+(push/on-event
+  (fn [e]
+    (cond
+      (push/incoming-call? e) (call/incoming! (push/event-data e))
+      (push/call-cancelled? e) (call/cancel! (push/call-id e))
+      (push/notification? e) …
+      (push/silent? e) …
+      (push/token-changed? e) …)))
 ```
 
-The host app must depend on both `mgl-push-cljd` (`deps.edn`) and `mgl-push-client` (`pubspec.yaml`).
+Namespaces: `mgl.push.api` · `core` · `events` · `config` · `device` · `token` · `notification` · `incoming-call` · `background`
 
-## Android FCM (Phase 2)
+## Android FCM (Phase 1)
 
-The host app must provide `google-services.json` and enable the Google Services plugin.  
-The plugin will:
+1. Host provides `google-services.json` and enables the Google Services plugin
+2. Detector: fall back to FCM when no CN vendor SDK is present
+3. `MglFirebaseMessagingService` is declared in the plugin Manifest
+4. Cold start: `PendingNativeStore` / `getInitialNotification`
 
-1. Detect FirebaseApp + Play Services
-2. Fetch the FCM token and emit `token_changed`
-3. Forward foreground messages via `MglFirebaseMessagingService` → Flutter `message` events
-4. Handle notification tap cold start → `notification_open` / `getInitialNotification`
+## Android Huawei (Phase 2)
 
-See [PROVIDERS.md](PROVIDERS.md).
+1. `android/app/agconnect-services.json`
+2. Repo: `https://developer.huawei.com/repo/`
+3. When HMS is available, Detector **prefers Huawei** (then FCM)
+4. `MglHmsMessageService` is declared in the plugin Manifest
+5. Messages arrive at `PendingNativeStore` when the Bridge is not ready
 
-## Android Huawei (Phase 4)
+## Android Xiaomi (Phase 2)
 
-1. Place `agconnect-services.json` under `android/app/`
-2. Add the repo `https://developer.huawei.com/repo/`
-3. When HMS Core is available, the detector prefers `huawei` over FCM
+1. Host adds the official MiPush SDK AAR
+2. Manifest meta-data: `XIAOMI_APP_ID` / `XIAOMI_APP_KEY`
+3. Copy [`android/examples/AppMiPushReceiver.kt`](../mgl-push-client/android/examples/AppMiPushReceiver.kt) into the host and register the Receiver
+4. **Server** must set `MGL_PUSH_XIAOMI_PACKAGE_NAME` (Android package name, not business `app_id`)
 
-## Android Xiaomi (Phase 5)
+## Android OPPO (Phase 3)
 
-1. Add the official MiPush SDK
-2. meta-data: `XIAOMI_APP_ID` / `XIAOMI_APP_KEY`
-3. `PushMessageReceiver` → `XiaomiBridge` (see `MglMiPushReceiverDocs.kt` in the plugin)
-
-## Android OPPO (Phase 6)
-
-1. Integrate the HeyTap Push SDK
+1. Integrate HeyTap Push SDK
 2. meta-data: `OPPO_APP_KEY` / `OPPO_APP_SECRET`
-3. Create notification channel `mgl_default`
-4. Forward callbacks via `OppoBridge`
+3. Create notification channel `mgl_default` (or match Category)
+4. Forward callbacks to `OppoBridge` (supports cold-start persistence)
+5. For data-only such as incoming call: server synthesizes a notification shell; real fields live in `action_parameters`
 
-## Android vivo (Phase 7)
+## Android vivo (Phase 3)
 
-1. Integrate the vivo Push SDK
-2. meta-data: `VIVO_APP_ID` / `VIVO_APP_KEY`
+1. Integrate vivo Push SDK
+2. meta-data: `VIVO_APP_ID` / `VIVO_APP_KEY` (or official `com.vivo.push.*`)
 3. Receiver → `VivoBridge` (see `MglVivoPushDocs.kt`)
 
-## iOS APNs (Phase 3)
+## iOS APNs + PushKit (Phase 1)
 
-1. Xcode → Signing & Capabilities → Push Notifications
-2. The plugin swizzles AppDelegate to obtain the device token
-3. Foreground messages / notification taps go through `UNUserNotificationCenterDelegate` → Flutter events
+1. Xcode → Push Notifications
+2. Incoming Call: enable **VoIP** capability (PushKit)
+3. Plugin swizzles AppDelegate and registers `PKPushRegistry`
+4. VoIP push → `incoming-call` DomainPushEvent; **CallKit belongs to mgl-call**
+5. Silent / background: `content-available` + AppDelegate remote-notification forwarding
 
-Optional manual forward:
+Optional manual forwarding:
 
 ```swift
 func application(_ application: UIApplication,
@@ -108,8 +138,16 @@ func application(_ application: UIApplication,
 
 ## installation_id
 
-The client generates a ULID, persists it, and keeps it separate from the vendor token. On token change:
+The client generates a ULID and persists it, separate from the vendor token. On token refresh:
 
 ```text
 PUT /v1/devices/{installation_id}/token
+{ "provider": "fcm", "token": "…" }
 ```
+
+iOS VoIP token changes also emit `token_changed` (`provider: apns_voip`).
+
+## Protocol
+
+JSON Schema: [`mgl-push-protocol/`](../mgl-push-protocol/)  
+(`event` · `notification` · `incoming-call` · `device`)

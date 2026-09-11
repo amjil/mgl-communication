@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/amjil/mgl-push/mgl-push-server/internal/auth"
 	"github.com/amjil/mgl-push/mgl-push-server/internal/domain"
@@ -58,6 +59,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /v1/devices/{installation_id}/user", s.handleClearUser)
 	s.mux.HandleFunc("DELETE /v1/devices/{installation_id}", s.handleUnregister)
 	s.mux.HandleFunc("POST /v1/messages", s.handleSendMessage)
+	s.mux.HandleFunc("POST /v1/messages/incoming-call", s.handleIncomingCall)
+	s.mux.HandleFunc("POST /v1/messages/call-cancelled", s.handleCallCancelled)
+	s.mux.HandleFunc("POST /v1/messages/call-ended", s.handleCallEnded)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -100,17 +104,19 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 }
 
 type registerDeviceRequest struct {
-	InstallationID string `json:"installation_id"`
-	UserID         string `json:"user_id"`
-	Platform       string `json:"platform"`
-	Provider       string `json:"provider"`
-	Token          string `json:"token"`
-	AppID          string `json:"app_id"`
-	AppVersion     string `json:"app_version"`
-	OSVersion      string `json:"os_version"`
-	DeviceModel    string `json:"device_model"`
-	Locale         string `json:"locale"`
-	Timezone       string `json:"timezone"`
+	InstallationID string   `json:"installation_id"`
+	UserID         string   `json:"user_id"`
+	Platform       string   `json:"platform"`
+	Provider       string   `json:"provider"`
+	Token          string   `json:"token"`
+	AppID          string   `json:"app_id"`
+	AppVersion     string   `json:"app_version"`
+	OSVersion      string   `json:"os_version"`
+	DeviceModel    string   `json:"device_model"`
+	Locale         string   `json:"locale"`
+	Timezone       string   `json:"timezone"`
+	Providers      []string `json:"providers"`
+	Capabilities   []string `json:"capabilities"`
 }
 
 func (s *Server) handleRegisterDevice(w http.ResponseWriter, r *http.Request) {
@@ -232,6 +238,7 @@ func (s *Server) handleUnregister(w http.ResponseWriter, r *http.Request) {
 }
 
 type sendMessageRequest struct {
+	Type            string            `json:"type"`
 	UserIDs         []string          `json:"user_ids"`
 	InstallationIDs []string          `json:"installation_ids"`
 	Provider        string            `json:"provider"`
@@ -266,6 +273,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	in := service.SendMessageInput{
 		AppID:           appID,
+		Type:            domain.MessageType(req.Type),
 		UserIDs:         req.UserIDs,
 		InstallationIDs: req.InstallationIDs,
 		Provider:        req.Provider,
@@ -279,6 +287,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		Badge:           req.Badge,
 		DeepLink:        req.DeepLink,
 		Category:        req.Category,
+		IdempotencyKey:  r.Header.Get("Idempotency-Key"),
 	}
 	if req.Notification != nil {
 		in.Title = req.Notification.Title
@@ -289,9 +298,109 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	writeSendResult(w, result)
+}
+
+type incomingCallRequest struct {
+	UserIDs         []string `json:"user_ids"`
+	InstallationIDs []string `json:"installation_ids"`
+	Call            *struct {
+		CallID     string `json:"call_id"`
+		CallerID   string `json:"caller_id"`
+		CalleeID   string `json:"callee_id"`
+		MediaType  string `json:"media_type"`
+		CallerName string `json:"caller_display_name"`
+		ExpiresAt  int64  `json:"expires_at"`
+	} `json:"call"`
+}
+
+func (s *Server) handleIncomingCall(w http.ResponseWriter, r *http.Request) {
+	appID, err := auth.RequireAppID(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var req incomingCallRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, domain.InvalidRequest("invalid json"))
+		return
+	}
+	if req.Call == nil {
+		writeError(w, domain.InvalidRequest("call is required"))
+		return
+	}
+	call := domain.IncomingCall{
+		CallID:     req.Call.CallID,
+		CallerID:   req.Call.CallerID,
+		CalleeID:   req.Call.CalleeID,
+		MediaType:  req.Call.MediaType,
+		CallerName: req.Call.CallerName,
+		Timestamp:  time.Now().UTC(),
+	}
+	if req.Call.ExpiresAt > 0 {
+		call.ExpiresAt = time.Unix(req.Call.ExpiresAt, 0).UTC()
+	}
+	result, err := s.messages.SendIncomingCall(r.Context(), service.SendIncomingCallInput{
+		AppID:           appID,
+		UserIDs:         req.UserIDs,
+		InstallationIDs: req.InstallationIDs,
+		Call:            call,
+		IdempotencyKey:  r.Header.Get("Idempotency-Key"),
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeSendResult(w, result)
+}
+
+type callSignalRequest struct {
+	CallID          string   `json:"call_id"`
+	UserIDs         []string `json:"user_ids"`
+	InstallationIDs []string `json:"installation_ids"`
+	Reason          string   `json:"reason"`
+}
+
+func (s *Server) handleCallCancelled(w http.ResponseWriter, r *http.Request) {
+	s.handleCallSignal(w, r, domain.MessageCallCancelled)
+}
+
+func (s *Server) handleCallEnded(w http.ResponseWriter, r *http.Request) {
+	s.handleCallSignal(w, r, domain.MessageCallEnded)
+}
+
+func (s *Server) handleCallSignal(w http.ResponseWriter, r *http.Request, typ domain.MessageType) {
+	appID, err := auth.RequireAppID(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var req callSignalRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, domain.InvalidRequest("invalid json"))
+		return
+	}
+	result, err := s.messages.SendCallSignal(r.Context(), service.SendCallSignalInput{
+		AppID:           appID,
+		Type:            typ,
+		CallID:          req.CallID,
+		UserIDs:         req.UserIDs,
+		InstallationIDs: req.InstallationIDs,
+		Reason:          req.Reason,
+		IdempotencyKey:  r.Header.Get("Idempotency-Key"),
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeSendResult(w, result)
+}
+
+func writeSendResult(w http.ResponseWriter, result *service.SendMessageResult) {
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"message_id": result.MessageID,
 		"accepted":   result.Accepted,
+		"duplicate":  result.Duplicate,
 	})
 }
 
