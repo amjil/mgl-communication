@@ -6,7 +6,7 @@
    ["dart:async" :as async]))
 
 (def ^:private !client (atom nil))
-(def ^:private !handlers (atom #{}))
+(def ^:private !handlers (atom {}))
 (def ^:private !sub (atom nil))
 
 (defn- ->config
@@ -121,22 +121,32 @@
     (let [stream (.-events ^push/MglPush client)
           sub (.listen stream
                        (fn [event]
-                         (doseq [h @!handlers]
+                         (doseq [h (vals @!handlers)]
                            (try (h event) (catch Error _)))))]
       (reset! !sub sub))))
 
 (defn on-event
-  "Register a handler for all push events (spec §12). Returns the handler."
-  ([handler]
-   (on-event (client!) handler))
-  ([client handler]
-   (swap! !handlers conj handler)
+  "Register a handler for all push events with a unique key (spec §12).
+   Same key overwrites the previous handler (hot-reload safe).
+   Returns a zero-arg cleanup function that removes this key.
+
+   Preferred for app-global handlers (incoming-call bridge, token, etc.).
+   For Widget-scoped UI updates, prefer (events) / StreamBuilder instead."
+  ([key handler]
+   (if (dart/is? key push/MglPush)
+     (throw (ex-info
+             "on-event requires a unique key. Use (on-event key handler) or (on-event client key handler)"
+             {}))
+     (on-event (client!) key handler)))
+  ([client key handler]
+   (swap! !handlers assoc key handler)
    (ensure-handler-sub! client)
-   handler))
+   #(swap! !handlers dissoc key)))
 
 (defn remove-handler
-  ([handler]
-   (swap! !handlers disj handler)
+  "Remove a previously registered handler by key."
+  ([key]
+   (swap! !handlers dissoc key)
    nil)
-  ([_client handler]
-   (remove-handler handler)))
+  ([_client key]
+   (remove-handler key)))

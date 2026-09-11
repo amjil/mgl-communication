@@ -141,7 +141,8 @@ push.events.listen((e) {
              :service-token "…"
              :app-id "net.amjil.nomio"})
 
-(push/on-event
+;; Unique key → hot-reload safe (same key overwrites). Returns cleanup fn.
+(push/on-event ::mgl-call
   (fn [event]
     (when (push/incoming-call? event)
       ;; Hand off to mgl-call; never require mgl-call inside mgl-push

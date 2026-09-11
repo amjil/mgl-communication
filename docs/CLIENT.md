@@ -71,7 +71,8 @@ See [`mgl-push-cljd/README.md`](../mgl-push-cljd/README.md). The host must depen
 
 (push/init! {:server-url "…" :service-token "…" :app-id "net.amjil.nomio"})
 (push/capabilities)
-(push/on-event
+;; Unique key → overwrites on hot reload; returns cleanup fn
+(push/on-event ::mgl-call
   (fn [e]
     (cond
       (push/incoming-call? e) (call/incoming! (push/event-data e))

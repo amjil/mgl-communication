@@ -39,10 +39,14 @@ dependencies:
 | `(push/set-user-id! id)` / `(push/clear-user-id!)` | User binding |
 | `(push/request-permission!)` | Notification permission |
 | `(push/capabilities)` | PushCapabilities |
-| `(push/on-event handler)` | Register event handler |
-| `(push/remove-handler handler)` | Remove handler |
+| `(push/on-event key handler)` | Register by unique key; returns cleanup fn |
+| `(push/remove-handler key)` | Remove handler by key |
+| `(push/events)` / `events-stream` | Raw event Stream (prefer for UI / StreamBuilder) |
 
-You can also pass an explicit `client` as the first argument (multi-instance).
+You can also pass an explicit `client` as the first argument (multi-instance):
+`(push/on-event client key handler)`.
+
+**Hot reload:** always use a stable `key` (keyword/string). Same key overwrites the previous handler. Do not register anonymous handlers without a key in Widget rebuild paths — use `(events)` + StreamBuilder for UI instead.
 
 ## Usage
 
@@ -59,29 +63,33 @@ You can also pass an explicit `client` as the first argument (multi-instance).
   :app-id "net.amjil.demo"
   :register-on-initialize true})
 
-(push/on-event
-  (fn [event]
-    (cond
-      (push/incoming-call? event)
-      (call/incoming! (push/event-data event))
+;; App-global bridge: keyed registration (hot-reload safe)
+(def dispose-push!
+  (push/on-event ::mgl-call
+    (fn [event]
+      (cond
+        (push/incoming-call? event)
+        (call/incoming! (push/event-data event))
 
-      (push/call-cancelled? event)
-      (call/cancel! (push/call-id event))
+        (push/call-cancelled? event)
+        (call/cancel! (push/call-id event))
 
-      (push/call-ended? event)
-      …
+        (push/call-ended? event)
+        …
 
-      (push/notification? event)
-      …
+        (push/notification? event)
+        …
 
-      (push/silent? event)
-      …
+        (push/silent? event)
+        …
 
-      (push/token-changed? event)
-      …
+        (push/token-changed? event)
+        …
 
-      (push/error? event)
-      …)))
+        (push/error? event)
+        …))))
+
+;; Later / tests: (dispose-push!)  or  (push/remove-handler ::mgl-call)
 ```
 
 Convert a DomainPushEvent to a Clojure map:
